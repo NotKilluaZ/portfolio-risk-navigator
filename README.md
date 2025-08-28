@@ -17,5 +17,5 @@ Built using **yfinance**, **NumPy**, **Pandas**, and **Plotly**.
 ## 🛠️ Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/portfolio-risk-navigator.git
+   git clone https://github.com/NotKilluaZ/portfolio-risk-navigator
    cd portfolio-risk-navigator
