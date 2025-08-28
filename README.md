@@ -1,13 +1,13 @@
 # 📊 Portfolio Risk Navigator
 
 A Python-based portfolio risk analysis tool that helps investors analyze expected returns, volatility, and asset allocations.  
-Built using **yfinance**, **NumPy**, **Pandas**, and **Plotly**.
+Built using **yfinance**, **NumPy**, **Plotly**, and **Streamlit**.
 
 ---
 
 ## 🚀 Features
 - Fetches historical price data from Yahoo Finance
-- Calculates portfolio **expected return** and **volatility**
+- Calculates portfolio **annual expected return** and **volatility**
 - Visualizes portfolio **asset allocation** with interactive pie charts
 - Modular design with separate data pipeline and risk analysis modules
 - Lightweight, no database required (runs fresh every time)
