@@ -4,5 +4,4 @@ yfinance
 numpy
 pandas
 matplotlib
-torch==2.1.0
-torchversion==0.16.0
+torch
