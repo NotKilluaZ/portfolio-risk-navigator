@@ -4,6 +4,7 @@ A Python-based portfolio risk analysis tool that helps investors analyze expecte
 Built using **yfinance**, **NumPy**, **Plotly**, and **Streamlit**.
 
 ---
+
 ## 🌐 Live Demo
 
 Try the app live on Streamlit:  
@@ -28,11 +29,16 @@ Try the app live on Streamlit:
 4. Explore your portfolio’s risk/return profile through the generated metrics and visuals  
 
 No setup required — just click, input, and analyze! 🚀  
+
 ---
+
 ## 🚀 Features
 - Fetches historical price data from Yahoo Finance
 - Calculates portfolio **annual expected return** and **volatility**
 - Visualizes portfolio **asset allocation** with interactive pie charts
+- 🔮 **LSTM Volatility Forecast**: Predicts future volatility for selected tickers using a trained LSTM model
+- 📊 **30-Day Historical Volatility Chart**: Visualizes recent volatility trends
+- 🏥 **Portfolio Health Gauge**: Provides an overall health score based on volatility, Sharpe ratio, drawdown, and diversification
 - Modular design with separate data pipeline and risk analysis modules
 - Lightweight, no database required (runs fresh every time)
 

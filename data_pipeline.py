@@ -19,3 +19,10 @@ def calculate_returns(prices):
     # Change in daily price of a ticker / stock
     returns = prices.pct_change().dropna()
     return returns
+
+def fetch_risk_free_rate():
+    # Fetch last 13 Week Treasury yield
+    irx = yf.Ticker("^IRX")
+    hist = irx.history(period="5d") # Last 5 days of data
+    latest_yield = hist["Close"].iloc[-1] # Latest closing value
+    return latest_yield / 100 # Changes % value to decimal
