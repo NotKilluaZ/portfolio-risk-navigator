@@ -3,169 +3,187 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset
 import random
+import pickle
+from pathlib import Path
+from typing import Optional
+
 
 # Reproducibility helper
-def set_seed(seed = 42):
+def set_seed(seed: int = 42) -> None:
+    """Set every random seed we rely on so experiments can be repeated."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 # Multi-step LSTM (sequence -> forecast_len outputs)
 class MultiStepLSTM(nn.Module):
-    def __init__(self, input_size = 1, hidden_size = 64, num_layers = 2, output_size = 1, dropout = 0.0):
+    """Standard LSTM stack that reads a sequence of scalars and forecasts multiple future steps."""
+
+    def __init__(
+        self,
+        input_size: int = 1,
+        hidden_size: int = 64,
+        num_layers: int = 2,
+        output_size: int = 30,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
-        self.fc = nn.Linear(hidden_size, output_size)  # output_size = forecast_len
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+        )
+        self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        # x: (batch, seq_len, 1)
-        out, _ = self.lstm(x)       # out: (batch, seq_len, hidden)
-        last = out[:, -1, :]        # (batch, hidden)
-        out = self.fc(last)         # (batch, output_size)
+        # x arrives with shape (batch, seq_len, 1). We only care about the last hidden state.
+        out, _ = self.lstm(x)
+        last = out[:, -1, :]
+        out = self.fc(last)
         return out
 
-def create_sequences_multi(data, seq_len, forecast_len):
+
+def create_sequences_multi(data: np.ndarray, seq_len: int, forecast_len: int):
+    # Slice a single series into overlapping (history, future) pairs for supervised learning.
     X, Y = [], []
     for i in range(len(data) - seq_len - forecast_len + 1):
         X.append(data[i : i + seq_len])
         Y.append(data[i + seq_len : i + seq_len + forecast_len])
     return np.array(X), np.array(Y)
 
-def train_and_predict(returns_series: pd.Series,
-                      seq_len: int = 30,
-                      forecast_len: int = 30,
-                      epochs: int = 150,
-                      batch_size: int = 32,
-                      hidden_size: int = 64,
-                      lr: float = 1e-3,
-                      device: str = "cpu",
-                      verbose: bool = False):
-    
-    #Trains a direct multi-step LSTM on the 30-day rolling volatility computed
-    #from the provided returns_series, then returns a forecast vector of length forecast_len (denormalized).
-    # - returns_series: pandas Series of returns (pct or log returns) with datetime index.
-    # - seq_len: how many past vol points to use.
-    # - forecast_len: how many steps to predict in the future (multi-step).
 
-    set_seed(42)
-    device = torch.device(device)
+# Streamlit inference utilities
+DEFAULT_MODEL_PATH = Path("models") / "universal_lstm.pth"
+DEFAULT_SCALER_PATH = Path("models") / "universal_scaler.pkl"
+DEFAULT_SEQ_LEN = 30
+DEFAULT_FORECAST_LEN = 30
+DEFAULT_DEVICE = "cpu"
+DEFAULT_MODEL_HIDDEN_SIZE = 64
+DEFAULT_MODEL_LAYERS = 2
 
-    # Input checks
-    returns_series = pd.Series(returns_series).dropna()
-    if returns_series.empty:
-        return np.array([])
 
-    # Create rolling 30-day volatility (same measure you plot)
-    rolling_vol = returns_series.rolling(window=30).std().dropna()
-    if len(rolling_vol) <= seq_len + forecast_len:
-        # not enough data
-        if verbose:
-            print("Not enough volatility points:", len(rolling_vol))
-        return np.array([])
+class LSTMVolatilityForecaster:
+    # Lightweight wrapper that turns the saved PyTorch weights + fitted scaler into a convenient
+    # `predict` helper for the Streamlit app. The heavy training step happens offline.
 
-    # Convert to numpy (keep indices for plotting externally)
-    vol_vals = rolling_vol.values.astype(float)
+    def __init__(
+        self,
+        model_path: Path = DEFAULT_MODEL_PATH,
+        scaler_path: Path = DEFAULT_SCALER_PATH,
+        seq_len: int = DEFAULT_SEQ_LEN,
+        forecast_len: int = DEFAULT_FORECAST_LEN,
+        device: str = DEFAULT_DEVICE,
+        hidden_size: int = DEFAULT_MODEL_HIDDEN_SIZE,
+        num_layers: int = DEFAULT_MODEL_LAYERS,
+        dropout: float = 0.0,
+    ) -> None:
+        self.model_path = Path(model_path)
+        self.scaler_path = Path(scaler_path)
+        self.seq_len = seq_len
+        self.forecast_len = forecast_len
+        self.device = torch.device(device)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.dropout = dropout
 
-    # Train / Val split (fit scaler on training portion only to avoid leakage)
-    total = len(vol_vals)
-    # use earliest 80% for train
-    train_cut = int(total * 0.8)
-    train_vol = vol_vals[:train_cut]
-    test_vol = vol_vals[train_cut - seq_len:]  # ensure sequences that start before cut can be used for test
+        # Load artifacts immediately so failures show up while the app starts up, not mid-request.
+        self.model = self._load_model()
+        self.scaler = self._load_scaler()
 
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaler.fit(train_vol.reshape(-1, 1))   # fit on train only
-    vol_norm = scaler.transform(vol_vals.reshape(-1, 1)).flatten()
-
-    # Create multi-step sequences on normalized series
-    X_all, Y_all = create_sequences_multi(vol_norm, seq_len, forecast_len)
-    if len(X_all) == 0:
-        return np.array([])
-
-    # Split into train/test by index on X_all
-    train_count = int(len(X_all) * 0.8)
-    X_train = X_all[:train_count]
-    Y_train = Y_all[:train_count]
-    X_val = X_all[train_count:]
-    Y_val = Y_all[train_count:]
-
-    # Convert to torch tensors
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).unsqueeze(-1)  # (N, seq, 1)
-    Y_train_t = torch.tensor(Y_train, dtype=torch.float32)               # (N, forecast_len)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32).unsqueeze(-1)
-    Y_val_t = torch.tensor(Y_val, dtype=torch.float32)
-
-    # Dataloaders
-    train_ds = TensorDataset(X_train_t, Y_train_t)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
-
-    # Model setup
-    model = MultiStepLSTM(input_size=1, hidden_size=hidden_size, num_layers=2, output_size=forecast_len).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-
-    # Optional scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
-
-    # Training loop
-    best_val = np.inf
-    for epoch in range(1, epochs + 1):
-        model.train()
-        train_losses = []
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            out = model(xb)          # (batch, forecast_len)
-            loss = loss_fn(out, yb)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            train_losses.append(loss.item())
-
-        # Validation loss
+    def _load_model(self) -> MultiStepLSTM:
+        if not self.model_path.exists():
+            raise FileNotFoundError(
+                f"Missing LSTM weights at {self.model_path}. Run train_universal_model.py first."
+            )
+        model = MultiStepLSTM(
+            input_size=1,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            output_size=self.forecast_len,
+            dropout=self.dropout,
+        ).to(self.device)
+        state_dict = torch.load(self.model_path, map_location=self.device)
+        model.load_state_dict(state_dict)
         model.eval()
+        return model
+
+    def _load_scaler(self) -> MinMaxScaler:
+        if not self.scaler_path.exists():
+            raise FileNotFoundError(
+                f"Missing scaler at {self.scaler_path}. Run train_universal_model.py first."
+            )
+        with open(self.scaler_path, "rb") as handle:
+            scaler = pickle.load(handle)
+        if not isinstance(scaler, MinMaxScaler):
+            raise TypeError("Loaded scaler is not a sklearn MinMaxScaler instance.")
+        return scaler
+
+    def predict(self, returns_series: pd.Series, horizon: int = DEFAULT_FORECAST_LEN) -> np.ndarray:
+        # Forecast the next `horizon` days of volatility for the supplied returns series.
+        # The scaler keeps the input distribution consistent with what the model saw offline.
+        if horizon <= 0:
+            raise ValueError("Forecast horizon must be a positive integer.")
+
+        returns_series = pd.Series(returns_series).dropna()
+        if returns_series.empty:
+            return np.array([])
+
+        # Compute rolling volatility in the same way the model was trained (30-day window).
+        rolling_vol = returns_series.rolling(window=self.seq_len).std().dropna()
+        if len(rolling_vol) < self.seq_len:
+            return np.array([])
+
+        # Normalise the last historical window so the model sees familiar scales.
+        last_window = rolling_vol.values[-self.seq_len :].astype(float)
+        last_window_norm = self.scaler.transform(last_window.reshape(-1, 1)).flatten()
+
+        # Prepare tensor with shape (batch=1, seq_len, features=1).
+        x_in = (
+            torch.tensor(last_window_norm, dtype=torch.float32)
+            .unsqueeze(0)
+            .unsqueeze(-1)
+            .to(self.device)
+        )
+
         with torch.no_grad():
-            val_out = model(X_val_t.to(device))
-            val_loss = loss_fn(val_out, Y_val_t.to(device)).item()
+            pred_norm = self.model(x_in).cpu().numpy().reshape(-1)
 
-        scheduler.step(val_loss)
-        if verbose and (epoch % 10 == 0 or epoch == 1 or epoch == epochs):
-            print(f"Epoch {epoch}/{epochs}  train_loss = {np.mean(train_losses):.6f}  val_loss={val_loss:.6f}")
+        # Return only the portion the caller asked for, denormalised back to volatility units.
+        pred_vol = self.scaler.inverse_transform(pred_norm.reshape(-1, 1)).flatten()
+        horizon = min(horizon, self.forecast_len)
+        return pred_vol[:horizon]
 
-        # Early stopping if no improvement in model
-        if val_loss < best_val:
-            best_val = val_loss
-            best_state = model.state_dict()
-            no_improve = 0
-        else:
-            no_improve = locals().get("no_improve", 0) + 1
-            if no_improve > 30:
-                if verbose:
-                    print("Early stopping at epoch", epoch)
-                break
 
-    # Restore best state
-    if 'best_state' in locals():
-        model.load_state_dict(best_state)
+def load_forecaster(
+    model_path: Optional[Path] = None,
+    scaler_path: Optional[Path] = None,
+    device: str = DEFAULT_DEVICE,
+) -> LSTMVolatilityForecaster:
+    # Convenience factory so Streamlit can cache a ready-to-use forecaster.
+    return LSTMVolatilityForecaster(
+        model_path=model_path or DEFAULT_MODEL_PATH,
+        scaler_path=scaler_path or DEFAULT_SCALER_PATH,
+        device=device,
+    )
 
-    # Forecast (predict next forecast_len from last available window)
-    model.eval()
-    last_window = vol_norm[-seq_len:]                     # normalized last seq
-    x_in = torch.tensor(last_window, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)  # (1, seq_len, 1)
-    with torch.no_grad():
-        pred_norm = model(x_in).cpu().numpy().reshape(-1)  # (forecast_len,)
 
-    # Inverse transform to original volatility units
-    pred_vol = scaler.inverse_transform(pred_norm.reshape(-1, 1)).flatten()
+__all__ = [
+    "DEFAULT_FORECAST_LEN",
+    "DEFAULT_MODEL_HIDDEN_SIZE",
+    "DEFAULT_MODEL_LAYERS",
+    "DEFAULT_MODEL_PATH",
+    "DEFAULT_SCALER_PATH",
+    "DEFAULT_SEQ_LEN",
+    "LSTMVolatilityForecaster",
+    "MultiStepLSTM",
+    "create_sequences_multi",
+    "load_forecaster",
+    "set_seed",
+]
 
-    # Diagnostics in terminal
-    if verbose:
-        print("rolling_vol stats: min/mean/max:", float(vol_vals.min()), float(vol_vals.mean()), float(vol_vals.max()))
-        print("pred_vol stats: min/mean/max:", float(pred_vol.min()), float(pred_vol.mean()), float(pred_vol.max()))
-        print("last historical vol:", float(vol_vals[-1]))
-
-    return pred_vol

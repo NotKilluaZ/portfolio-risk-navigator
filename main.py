@@ -6,7 +6,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from data_pipeline import fetch_ticker_data, calculate_returns, fetch_risk_free_rate
 from risk_analysis import portfolio_return, portfolio_volatility, sharpe_ratio as compute_sharpe_ratio
-from lstm_model import train_and_predict
+from lstm_model import load_forecaster
+
+@st.cache_resource
+def get_forecaster():
+    # Cache the pre-trained LSTM so the app only loads weights once per session.
+    return load_forecaster(device="cpu")
 
 # Function to make gradient health score scale
 def gradient_steps(n=100):
@@ -118,11 +123,11 @@ selected_stock = st.selectbox("Select ticker for LSTM forecast", tickers)
 # Let user pick how far into the future the model will predict
 selected_forecast = st.selectbox("Select forecast horizon (days):", [1, 5, 10, 30], index = 0)
 
-with st.spinner("Training LSTM model and generating forecast... This may take a second ⏳"):
-    # Run LSTM predictions
+with st.spinner("Generating LSTM forecast... This may take a moment!"):
+    # Grab returns for the selected ticker and reuse the cached universal LSTM for inference.
     return_series = returns[selected_stock].dropna()
-    predicted_vol = train_and_predict(return_series, seq_len = 30, forecast_len = selected_forecast, epochs=150,
-    batch_size=32, hidden_size=64, device="cpu", verbose=True)      # set verbose True for debug info (false for none)
+    forecaster = get_forecaster()
+    predicted_vol = forecaster.predict(return_series, horizon=selected_forecast)
     predicted_vol = np.array(predicted_vol).flatten()
 
 st.success("Forecast complete!")
@@ -236,3 +241,4 @@ health_score_fig.update_layout(
 )
 
 st.plotly_chart(health_score_fig)
+

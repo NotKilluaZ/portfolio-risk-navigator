@@ -1,0 +1,15 @@
+{
+  "tickers_used": 503,
+  "period": "10y",
+  "seq_len": 30,
+  "forecast_len": 30,
+  "hidden_size": 64,
+  "num_layers": 2,
+  "epochs": 80,
+  "batch_size": 128,
+  "lr": 0.001,
+  "patience": 15,
+  "device": "cpu",
+  "max_samples": 200000,
+  "actual_samples": 200000
+}

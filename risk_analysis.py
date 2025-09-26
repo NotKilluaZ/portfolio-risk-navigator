@@ -22,7 +22,7 @@ def portfolio_volatility(returns, weights):
     # Since the volatility formula is squared, we sqrt it using np.sqrt() to negate it
     # np.dot(cov_matrix, weights) multiplies the weights vector and the covariance matrix using dot product
     # np.dot(weights.T, ...) multiplies the transposed weights vector to sum the weighted
-    #  variances and covariances into a scalar value
+    # variances and covariances into a scalar value
     return np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
 
 def sharpe_ratio(portfolio_return, portfolio_volatility, risk_free_rate):

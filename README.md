@@ -15,17 +15,12 @@ Try the app live on Streamlit:
 - Instantly view your:
   - 📈 Expected annual return  
   - 📉 Annualized portfolio volatility  
-  - 🥧 Asset allocation pie chart  
-
-*(Optional, if implemented)* You may also explore:  
-- Rolling volatility over time  
-- Return breakdowns per asset  
-- Stress testing or scenario simulations  
+  - 🥧 Asset allocation pie chart   
 
 ### How to Use It
 1. Enter your desired ticker symbols  
 2. Assign weights (make sure they sum to 1)  
-3. Click **Analyze** (or let Streamlit auto-update)  
+3. Let Streamlit auto-update  
 4. Explore your portfolio’s risk/return profile through the generated metrics and visuals  
 
 No setup required — just click, input, and analyze! 🚀  
@@ -49,3 +44,10 @@ No setup required — just click, input, and analyze! 🚀
    ```bash
    git clone https://github.com/NotKilluaZ/portfolio-risk-navigator
    cd portfolio-risk-navigator
+   ```
+
+## Universal LSTM Workflow
+- The Streamlit app now loads a single pre-trained volatility model instead of retraining per ticker.
+- Run `python train_universal_model.py` periodically to refresh `models/universal_lstm.pth` and `models/universal_scaler.pkl`.
+- The script pulls S&P 500 members from Yahoo Finance, trains on rolling volatility, and caches metadata in `models/universal_meta.json`.
+- Deployments only need the serialized model/scaler files; inference is lightweight and cached per Streamlit session.
