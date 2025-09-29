@@ -299,8 +299,9 @@ st.text("")
 st.text("")
 st.subheader("3D Volatility Surface")
 
+chosen_stock = st.selectbox("Select ticker for volatility surface", tickers)
 option_type = st.selectbox("Option Type", ("Call", "Put"), index=0)
-option_data = fetch_option_chain(selected_stock, limit_expiries=5, option_type="call")
+option_data = fetch_option_chain(chosen_stock, limit_expiries=5, option_type="call")
 if option_data.empty:
     st.info("No option-chain data available to build a volatility surface.")
 else:
@@ -354,7 +355,7 @@ else:
             )
         )
         surface_fig.update_layout(
-            title=f"{selected_stock} {option_type} Option Implied Volatility Surface",
+            title=f"{chosen_stock} {option_type} Option Implied Volatility Surface",
             scene=dict(
                 xaxis_title="Moneyness (K / S)",
                 yaxis_title="Time to Maturity (years)",
