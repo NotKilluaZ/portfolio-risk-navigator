@@ -15,7 +15,7 @@ Try the app live on Streamlit:
 - Instantly view your:
   - 📈 Expected annual return  
   - 📉 Annualized portfolio volatility  
-  - 🥧 Asset allocation pie chart   
+  - 🥧 Asset allocation pie chart
 
 ### How to Use It
 1. Enter your desired ticker symbols  
@@ -34,6 +34,7 @@ No setup required — just click, input, and analyze! 🚀
 - 🔮 **LSTM Volatility Forecast**: Predicts future volatility for selected tickers using a trained LSTM model
 - 📊 **30-Day Historical Volatility Chart**: Visualizes recent volatility trends
 - 🏥 **Portfolio Health Gauge**: Provides an overall health score based on volatility, Sharpe ratio, drawdown, and diversification
+- **Implied Volatility Surface (3D)**: Generates interactive volatility surfaces for call and put option chains across strikes and maturities
 - Modular design with separate data pipeline and risk analysis modules
 - Lightweight, no database required (runs fresh every time)
 

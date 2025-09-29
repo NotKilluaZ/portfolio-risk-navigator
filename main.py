@@ -4,9 +4,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import pandas as pd
-from data_pipeline import fetch_ticker_data, calculate_returns, fetch_risk_free_rate
-from risk_analysis import portfolio_return, portfolio_volatility, sharpe_ratio as compute_sharpe_ratio
+from data_pipeline import fetch_ticker_data, calculate_returns, fetch_risk_free_rate, fetch_option_chain
+from risk_analysis import portfolio_return, portfolio_volatility, sharpe_ratio as compute_sharpe_ratio, implied_volatility
 from lstm_model import load_forecaster
+from scipy.interpolate import griddata
 
 @st.cache_resource
 def get_forecaster():
@@ -35,9 +36,7 @@ def gradient_steps(n=100):
     return steps
 
 
-
 st.title("Portfolio Risk Navigator")
-
 st.subheader("Enter Portfolio Assets")
 
 tickers = []
@@ -61,6 +60,25 @@ for i in range(num_assets):
         )
         amounts.append(amount)
 
+# Validate tickers (no blanks, no duplicates)
+normalized_tickers = []
+duplicates = set()
+seen = set()
+
+for t in tickers:
+    cleaned = t.strip().upper()
+    if not cleaned:
+        continue  # ignore blank entries
+    if cleaned in seen:
+        duplicates.add(cleaned)
+    else:
+        seen.add(cleaned)
+    normalized_tickers.append(cleaned)
+
+if duplicates:
+    st.error(f"Duplicate tickers detected: {', '.join(sorted(duplicates))}. Please use each symbol only once.")
+    st.stop()
+
 total_amount = sum(amounts)
 weights = [amt / total_amount for amt in amounts] if total_amount > 0 else [0] * len(amounts)
 
@@ -71,12 +89,25 @@ for t, w in zip(tickers, weights):
 
 prices = fetch_ticker_data(tickers)
 returns = calculate_returns(prices)
+# Compute 30-day rolling volatility for each ticker (business days)
+rolling_window = 30  # adjust if you want
+historical_vol_df = returns.rolling(window=rolling_window).std().dropna()
+
+st.text("")  # blank line for padding
 
 st.write("**Portfolio Price Chart:**")
 st.line_chart(prices)
 
-st.write("Portfolio Return: ", portfolio_return(returns, weights))
-st.write("Portfolio Volatility: ", portfolio_volatility(returns, weights))
+st.text("")
+
+st.write(f"**{rolling_window}-Day Historical Volatility:**")
+if historical_vol_df.empty:
+    st.warning("Not enough data to compute rolling volatility for the selected window.")
+else:
+    st.line_chart(historical_vol_df)
+
+st.write("Projected Annual Portfolio Return: ", portfolio_return(returns, weights))
+st.write("Projected Annual Portfolio Volatility: ", portfolio_volatility(returns, weights))
 
 # Show a correlation heat map and how each ticker pair is correlated
 # Higher value means more correlated (if one goes up the other will go up as well)
@@ -108,13 +139,13 @@ with col1:
     st.metric("Expected Annual Return: ", f"{p_return:.2%}")
 
 with col2:
-    st.metric("Volatility: ", f"{p_volatility:.2%}")
+    st.metric("Annualised Volatility: ", f"{p_volatility:.2%}")
 
 with col3:
-    st.metric("Sharpe Ratio: ", f"{sharpe_ratio:.2f}")
+    st.metric("Annualised Sharpe Ratio: ", f"{sharpe_ratio:.2f}")
 
 
-st.text("")  # blank line for padding
+st.text("")
 st.text("")
 st.subheader("LSTM Voltaility Forecast")
 
@@ -160,38 +191,60 @@ else:
 # Forecast volatility score
 # Based on LSTM model
 # Take predicted volatility for the selected forecast horizon
-hist_q90 = float(historical_vol.quantile(0.90))
-max_vol_threshold = max(hist_q90, 1e-6)
-pred_vol_forecast = float(np.nan_to_num(predicted_vol[-1], nan=0.0, posinf=max_vol_threshold, neginf=0.0))
-fvs = 100 * (1 - pred_vol_forecast / (2 * max_vol_threshold))
-fvs = float(np.clip(fvs, 0, 100))
+pred_vol_forecast = float(
+    np.nan_to_num(predicted_vol[-1], nan=0.0, posinf=1.0, neginf=0.0)
+)
+hist_median = float(historical_vol.median())
+hist_std = float(historical_vol.std(ddof=0))
+
+if hist_std <= 1e-6:
+    fvs = 40.0
+else:
+    z_score = (pred_vol_forecast - hist_median) / hist_std
+    fvs = float(np.clip(50 - 35 * z_score, 0, 100))
+
 
 # Rolling volatility score
 # Based on last 30-day volatility
-recent_vol = returns.tail(30).std().mean(skipna=True)
-recent_vol = float(np.nan_to_num(recent_vol, nan=0.0, posinf=0.0, neginf=0.0))
-rvs = float(np.clip(100 - recent_vol*1000, 0, 100))
+weights_arr = np.array(weights, dtype=float)
+aligned_returns = returns.dropna()
+if aligned_returns.empty or np.isclose(weights_arr.sum(), 0.0):
+    rvs = 50.0
+else:
+    portfolio_daily = aligned_returns @ weights_arr
+    hist_port_vol = portfolio_daily.rolling(window=30).std().dropna()
+    if hist_port_vol.empty:
+        rvs = 50.0
+    else:
+        current_vol = float(hist_port_vol.iloc[-1])
+        vol_mean = float(hist_port_vol.mean())
+        vol_std = float(hist_port_vol.std(ddof=0))
+        if vol_std <= 1e-6:
+            z_score = 0.0
+        else:
+            z_score = (current_vol - vol_mean) / vol_std
+        rvs = float(np.clip(50 - 45 * z_score, 0, 100))
+
 
 # Sharpe Ratio score
-sharpe_ratio = float(np.nan_to_num(sharpe_ratio, nan=0.0, posinf=2.0, neginf=0.0))
-if sharpe_ratio <= 0:
-    ss = 0.0
-elif sharpe_ratio >= 2.0:
-    ss = 100.0
-else:
-    ss = float(sharpe_ratio / 2.0 * 100.0)
+sharpe_clean = float(np.nan_to_num(sharpe_ratio, nan=0.0))
+ss = float(np.clip(50 + 40 * np.tanh(sharpe_clean * 3.0), 0, 100))
 
 # Max Drawdown score
 # Drawdown measures the largest drop in value of portfolio from it's peak
 # Max Drawdowns essentially let an investor know what the historically max amount of money
 # they can lose from a peak (drawdown = peak-to-trough)
-port_ret = (returns.fillna(0).values @ np.array(weights, dtype=float))
-port_ret = pd.Series(port_ret, index=returns.index)
-cum = (1 + port_ret).cumprod()
-running_max = cum.cummax()
-drawdown = (cum - running_max) / running_max
-max_drawdown = float(drawdown.min()) if not drawdown.empty else 0.0
-dds = float(np.clip(100 + max_drawdown*100, 0, 100))
+weights_arr = np.array(weights, dtype=float)
+aligned_returns = returns.dropna()
+if aligned_returns.empty or np.isclose(weights_arr.sum(), 0.0):
+    max_drawdown = 0.0
+else:
+    portfolio_daily = aligned_returns @ weights_arr
+    cumulative = (1 + portfolio_daily).cumprod()
+    running_max = cumulative.cummax()
+    drawdown = (cumulative - running_max) / running_max
+    max_drawdown = float(drawdown.min())
+dds = float(np.clip(85 + max_drawdown * 180, 0, 100))
 
 # Concentration penalty (100 means fully diversified and 0 means fully concentrated)
 # Rewards diversification (Modern Portfolio Theory encourages diversification)
@@ -206,7 +259,7 @@ else:
 # Gives more importance for different factors
 # Forecast volume has most weight (most impact on health score) // 0.35
 # Concentration penalty has least weight (least impact on health score) // 0.10
-health_score = 0.35*fvs + 0.20*rvs + 0.20*ss + 0.15*dds + 0.10*cp
+health_score = 0.20*fvs + 0.20*rvs + 0.30*ss + 0.15*dds + 0.15*cp
 health_score = float(np.nan_to_num(health_score, nan=0.0, posinf=100.0, neginf=0.0))
 
 
@@ -242,3 +295,72 @@ health_score_fig.update_layout(
 
 st.plotly_chart(health_score_fig)
 
+st.text("")
+st.text("")
+st.subheader("3D Volatility Surface")
+
+option_type = st.selectbox("Option Type", ("Call", "Put"), index=0)
+option_data = fetch_option_chain(selected_stock, limit_expiries=5, option_type="call")
+if option_data.empty:
+    st.info("No option-chain data available to build a volatility surface.")
+else:
+    rf_rate = fetch_risk_free_rate()
+    option_data["implied_vol"] = option_data.apply(
+        lambda row: implied_volatility(
+            market_price=row["mid_price"],
+            spot=row["underlying_price"],
+            strike=row["strike"],
+            time_to_maturity=row["time_to_maturity"],
+            risk_free_rate=rf_rate,
+            option_type="call",
+        ),
+        axis=1,
+    )
+    option_data = option_data.dropna(subset=["implied_vol"])
+
+    if option_data.empty:
+        st.warning("Could not compute implied vols for the available strikes.")
+    else:
+        m = option_data["moneyness"].values
+        t = option_data["time_to_maturity"].values
+        iv = option_data["implied_vol"].values
+
+        m_grid = np.linspace(m.min(), m.max(), 40)
+        t_grid = np.linspace(t.min(), t.max(), 40)
+        M, T = np.meshgrid(m_grid, t_grid)
+        surface = griddata((m, t), iv, (M, T), method="linear")
+
+        surface_fig = go.Figure()
+        surface_fig.add_trace(
+            go.Surface(
+                x=M,
+                y=T,
+                z=surface,
+                colorscale="Viridis",
+                showscale=True,
+                opacity=0.85,
+                name="IV Surface",
+            )
+        )
+        surface_fig.add_trace(
+            go.Scatter3d(
+                x=m,
+                y=t,
+                z=iv,
+                mode="markers",
+                marker=dict(size=4, color="white"),
+                name="Observed",
+                hovertemplate="Moneyness: %{x:.2f}<br>T (yrs): %{y:.2f}<br>IV: %{z:.2%}<extra></extra>",
+            )
+        )
+        surface_fig.update_layout(
+            title=f"{selected_stock} {option_type} Option Implied Volatility Surface",
+            scene=dict(
+                xaxis_title="Moneyness (K / S)",
+                yaxis_title="Time to Maturity (years)",
+                zaxis_title="Implied Volatility",
+            ),
+            height=800,  # increase vertical space
+            margin=dict(l=30, r=30, t=70, b=50)
+        )
+        st.plotly_chart(surface_fig, use_container_width=True)
