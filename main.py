@@ -42,6 +42,11 @@ from forecast_allocation import (
     build_vol_comparison_table,
     format_vol_comparison,
 )
+from backtester import (
+    simulate_portfolio,
+    compute_backtest_stats,
+    build_comparison_stats,
+)
 
 @st.cache_resource
 def get_forecaster():
@@ -894,5 +899,144 @@ try:
             f"({total_traded / total_amount:.1%} of portfolio)"
         )
 
+
+    # BACKTEST
+    st.text("")
+    st.text("")
+    st.subheader("Backtest: Your Weights vs Optimised")
+    st.write(
+        "This section simulates what would have happened if you had held "
+        "your current allocation versus the optimised allocation over the "
+        "**entire historical window**. Both portfolios start at the same "
+        "dollar value and are never rebalanced — pure buy-and-hold."
+    )
+
+    backtest_start_val = st.number_input(
+        "Starting portfolio value ($) for backtest",
+        min_value=100.00, value=10000.00, step=100.00, format="%.2f",
+        help="Both portfolios start with this same dollar amount.",
+    )
+
+    # Simulate both portfolios
+    user_sim = simulate_portfolio(returns, current_weights_dict, starting_value=backtest_start_val)
+    opt_sim = simulate_portfolio(returns, opt_result["weights"], starting_value=backtest_start_val)
+
+    user_stats = compute_backtest_stats(user_sim, risk_free_rate=risk_free_rate)
+    opt_stats = compute_backtest_stats(opt_sim, risk_free_rate=risk_free_rate)
+
+    # Cumulative return chart
+    st.write("**Portfolio Value Over Time**")
+    value_chart = pd.DataFrame({
+        "Your Weights": user_sim["portfolio_value"],
+        "Optimised Weights": opt_sim["portfolio_value"],
+    })
+    fig_value = go.Figure()
+    fig_value.add_trace(go.Scatter(
+        x=value_chart.index, y=value_chart["Your Weights"],
+        mode="lines", name="Your Weights",
+        line=dict(color="red", width=2),
+    ))
+    fig_value.add_trace(go.Scatter(
+        x=value_chart.index, y=value_chart["Optimised Weights"],
+        mode="lines", name="Optimised Weights",
+        line=dict(color="limegreen", width=2),
+    ))
+    fig_value.update_layout(
+        yaxis_title="Portfolio Value ($)",
+        xaxis_title="Date",
+        yaxis=dict(tickprefix="$", tickformat=",.0f"),
+        height=450,
+        showlegend=True,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_value, width='stretch')
+
+    # Final values
+    user_final = user_sim["portfolio_value"].iloc[-1]
+    opt_final = opt_sim["portfolio_value"].iloc[-1]
+    dollar_diff = opt_final - user_final
+
+    val_col1, val_col2, val_col3 = st.columns(3)
+    with val_col1:
+        st.metric(
+            "Your Final Value",
+            f"${user_final:,.2f}",
+            help="What your portfolio would be worth today with your original weights.",
+        )
+    with val_col2:
+        st.metric(
+            "Optimised Final Value",
+            f"${opt_final:,.2f}",
+            delta=f"${dollar_diff:+,.2f}",
+            help="What the optimised portfolio would be worth today.",
+        )
+    with val_col3:
+        st.metric(
+            "Difference",
+            f"${abs(dollar_diff):,.2f}",
+            delta="Optimised wins" if dollar_diff > 0 else "Your weights win",
+            delta_color="normal" if dollar_diff > 0 else "inverse",
+            help="The dollar difference between the two strategies.",
+        )
+
+    # Drawdown comparison chart
+    st.write("**Drawdown Comparison**")
+    st.caption(
+        "Drawdowns show how far each portfolio fell from its peak at any point. "
+        "Shallower drawdowns mean less pain during downturns."
+    )
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(
+        x=user_sim.index, y=user_sim["drawdown"] * 100,
+        mode="lines", name="Your Weights",
+        line=dict(color="red", width=1.5),
+        fill="tozeroy", fillcolor="rgba(255,0,0,0.1)",
+    ))
+    fig_dd.add_trace(go.Scatter(
+        x=opt_sim.index, y=opt_sim["drawdown"] * 100,
+        mode="lines", name="Optimised Weights",
+        line=dict(color="limegreen", width=1.5),
+        fill="tozeroy", fillcolor="rgba(0,255,0,0.1)",
+    ))
+    fig_dd.update_layout(
+        yaxis_title="Drawdown (%)",
+        xaxis_title="Date",
+        yaxis=dict(ticksuffix="%"),
+        height=350,
+        showlegend=True,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_dd, width='stretch')
+
+    # Side-by-side stats table
+    st.write("**Full Statistics Comparison**")
+    comparison_table = build_comparison_stats(user_stats, opt_stats)
+    st.dataframe(comparison_table, width='stretch', hide_index=True)
+
+    # Verdict
+    if dollar_diff > 0:
+        st.success(
+            f"Over this historical period, the optimised portfolio would have "
+            f"earned **${dollar_diff:,.2f} more** than your current allocation "
+            f"({opt_stats['total_return']:.1%} vs {user_stats['total_return']:.1%} total return)."
+        )
+    elif dollar_diff < 0:
+        st.info(
+            f"Over this historical period, your current allocation would have "
+            f"outperformed the optimised portfolio by **${abs(dollar_diff):,.2f}** "
+            f"({user_stats['total_return']:.1%} vs {opt_stats['total_return']:.1%} total return). "
+            f"The optimiser may still offer better risk-adjusted returns — check the Sharpe and Sortino ratios."
+        )
+    else:
+        st.info("Both portfolios produced identical returns over this period.")
+
+    st.caption(
+        "**Important:** This backtest uses historical data and assumes you held "
+        "these exact weights from day one with no rebalancing. Past performance does "
+        "not guarantee future results. The optimiser picks weights based on the full "
+        "history, so it has a hindsight advantage — real-world results will differ."
+    )
+
 except ValueError as e:
     st.warning(f"Optimisation requires at least 2 assets with valid data. ({e})")
+

@@ -84,6 +84,15 @@ Implements the MIT lecture principle that diversification only works if you reba
 - **Trade List** — Concrete buy/sell orders with dollar amounts based on your total portfolio value
 - **Turnover Calculation** — How much money needs to move, in dollars and as a percentage
 
+### Backtest: Your Weights vs Optimised
+Simulates historical performance to answer "would following the app's advice have made me more money?":
+- **Portfolio Value Over Time** — Interactive chart comparing both portfolios from the same starting dollar amount
+- **Final Value Comparison** — Exact dollar difference between the two strategies
+- **Drawdown Comparison** — Side-by-side drawdown curves showing which portfolio had deeper dips
+- **Full Statistics Table** — 10 metrics head-to-head: total return, CAGR, Sharpe, Sortino, max drawdown, Calmar, best/worst day, and win rate
+- Includes a hindsight bias disclaimer — the optimiser picks weights using the full history, so real-world results will differ
+```
+
 ### Guided Tooltips
 Every metric includes a hover tooltip explaining:
 - What the metric measures
@@ -101,6 +110,7 @@ portfolio-risk-navigator/
 ├── risk_analysis.py           # Portfolio math, Sharpe, and downside risk metrics
 ├── optimizer.py               # Min-variance, max-Sharpe, risk parity, CVaR, efficient frontier
 ├── rebalancer.py              # Drift tracking and trade list generation
+├── backtester.py              # Historical backtest: your weights vs optimised
 ├── expected_gl.py             # Expected Gain/Loss framework (MIT Lecture 13)
 ├── forecast_allocation.py     # LSTM → forecast covariance → allocation engine
 ├── lstm_model.py              # LSTM model definition and inference
