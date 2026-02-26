@@ -58,47 +58,109 @@ def sharpe_ratio(portfolio_return, std_deviation_portfolio_return, risk_free_rat
 
 OptionType = Literal["call", "put"]
 
-# BSM for options pricing model
-def black_scholes_price(
-    spot: float,
-    strike: float,
-    time_to_maturity: float,
-    risk_free_rate: float,
-    volatility: float,
-    option_type: OptionType = "call",
-) -> float:
-    if time_to_maturity <= 0 or volatility <= 0 or spot <= 0 or strike <= 0:
-        return max(0.0, spot - strike) if option_type == "call" else max(0.0, strike - spot)
+def _portfolio_daily_returns(returns, weights):
+    """Collapse asset returns into a single weighted portfolio series."""
+    w = np.array(weights, dtype=float)
+    aligned = returns.dropna()
+    if aligned.empty or not np.isclose(w.sum(), 1.0):
+        return np.array([])
+    return (aligned @ w).values
 
-    sigma_sqrt_t = volatility * sqrt(time_to_maturity)
-    d1 = (log(spot / strike) + (risk_free_rate + 0.5 * volatility**2) * time_to_maturity) / sigma_sqrt_t
-    d2 = d1 - sigma_sqrt_t
+def sortino_ratio(returns, weights, risk_free_rate: float = 0.0) -> float:
+    """
+    Like Sharpe, but only penalises downside volatility.
 
-    if option_type == "call":
-        return spot * norm.cdf(d1) - strike * exp(-risk_free_rate * time_to_maturity) * norm.cdf(d2)
-    else:
-        return strike * exp(-risk_free_rate * time_to_maturity) * norm.cdf(-d2) - spot * norm.cdf(-d1)
+    Sortino = (R_p - R_f) / σ_downside
 
-# Call BSM to get the implied volatility at each strike price (moneyness) & time to maturity
-def implied_volatility(
-    market_price: float,
-    spot: float,
-    strike: float,
-    time_to_maturity: float,
-    risk_free_rate: float,
-    option_type: OptionType = "call",
-    *,
-    lower: float = 1e-4,
-    upper: float = 5.0,
-) -> float:
-    intrinsic = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
-    if market_price <= intrinsic or time_to_maturity <= 0:
+    σ_downside is computed from negative returns only, then annualised.
+    This directly addresses that upside uncertainty
+    is not risk — only losses are.
+    """
+    daily = _portfolio_daily_returns(returns, weights)
+    if len(daily) == 0:
         return np.nan
 
-    def objective(vol: float) -> float:
-        return black_scholes_price(spot, strike, time_to_maturity, risk_free_rate, vol, option_type) - market_price
+    ann_ret = portfolio_return(returns, weights)
+    negative = daily[daily < 0]
+    if len(negative) == 0:
+        return np.inf  # no downside observed
 
-    try:
-        return brentq(objective, lower, upper, maxiter=100, xtol=1e-6)
-    except ValueError:
+    downside_dev = np.sqrt(np.mean(negative ** 2)) * np.sqrt(252)
+    if downside_dev < 1e-10:
         return np.nan
+    return (ann_ret - risk_free_rate) / downside_dev
+
+
+def value_at_risk(returns, weights, alpha: float = 0.95) -> float:
+    """
+    Historical VaR at confidence level alpha.
+
+    Returns a positive number representing the loss threshold:
+    "With alpha% confidence, daily loss will not exceed this value."
+    """
+    daily = _portfolio_daily_returns(returns, weights)
+    if len(daily) == 0:
+        return np.nan
+    return -np.percentile(daily, (1 - alpha) * 100)
+
+
+def conditional_var(returns, weights, alpha: float = 0.95) -> float:
+    """
+    CVaR / Expected Shortfall at confidence level alpha.
+
+    This is the 'Expected Loss' — the average
+    of all losses that fall beyond the VaR threshold.
+
+    Returns a positive number: "On the worst (1-alpha)% of days,
+    the average loss is this much."
+    """
+    daily = _portfolio_daily_returns(returns, weights)
+    if len(daily) == 0:
+        return np.nan
+    var = np.percentile(daily, (1 - alpha) * 100)
+    tail = daily[daily <= var]
+    if len(tail) == 0:
+        return -var
+    return -np.mean(tail)
+
+
+def max_drawdown(returns, weights) -> float:
+    """
+    Largest peak-to-trough decline in cumulative portfolio value.
+
+    Returns a negative number (e.g. -0.35 means a 35% drawdown).
+    """
+    daily = _portfolio_daily_returns(returns, weights)
+    if len(daily) == 0:
+        return 0.0
+    cumulative = np.cumprod(1 + daily)
+    running_max = np.maximum.accumulate(cumulative)
+    drawdowns = (cumulative - running_max) / running_max
+    return float(np.min(drawdowns))
+
+
+def calmar_ratio(returns, weights) -> float:
+    """
+    Calmar = Annualised Return / |Max Drawdown|
+
+    Measures return earned per unit of drawdown risk.
+    """
+    ann_ret = portfolio_return(returns, weights)
+    mdd = max_drawdown(returns, weights)
+    if abs(mdd) < 1e-10:
+        return np.nan
+    return ann_ret / abs(mdd)
+
+
+def downside_metrics(returns, weights, risk_free_rate: float = 0.0, alpha: float = 0.95) -> dict:
+    """
+    Compute all downside risk metrics in one call.  Returns a dict
+    that can be directly displayed in Streamlit.
+    """
+    return {
+        "sortino_ratio": sortino_ratio(returns, weights, risk_free_rate),
+        "var_daily": value_at_risk(returns, weights, alpha),
+        "cvar_daily": conditional_var(returns, weights, alpha),
+        "max_drawdown": max_drawdown(returns, weights),
+        "calmar_ratio": calmar_ratio(returns, weights),
+    }

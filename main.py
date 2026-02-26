@@ -4,10 +4,44 @@ import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import pandas as pd
-from data_pipeline import fetch_ticker_data, calculate_returns, fetch_risk_free_rate, fetch_option_chain
-from risk_analysis import portfolio_return, portfolio_volatility, sharpe_ratio as compute_sharpe_ratio, implied_volatility
+from data_pipeline import (
+    fetch_ticker_data, 
+    calculate_returns, 
+    fetch_risk_free_rate
+)
+from risk_analysis import (
+    portfolio_return, 
+    portfolio_volatility, 
+    sharpe_ratio as compute_sharpe_ratio,
+    downside_metrics
+)
+from expected_gl import compute_gl_table, format_gl_table
+from expected_gl import compute_gl_table, format_gl_table
 from lstm_model import load_forecaster
-from scipy.interpolate import griddata
+from optimizer import (
+    min_variance_weights,
+    max_sharpe_weights,
+    risk_parity_weights,
+    min_cvar_weights,
+    compute_efficient_frontier,
+    compare_portfolios
+)
+from rebalancer import (
+    compute_drift,
+    total_drift,
+    needs_rebalancing,
+    generate_trade_list,
+    format_drift_table,
+    format_trade_list,
+)
+from forecast_allocation import (
+    forecast_all_vols,
+    forecast_min_variance,
+    forecast_risk_parity,
+    volatility_target_weights,
+    build_vol_comparison_table,
+    format_vol_comparison,
+)
 
 @st.cache_resource
 def get_forecaster():
@@ -46,17 +80,18 @@ num_assets = st.number_input("How many assets are in your portfolio?", min_value
 
 for i in range(num_assets):
 
-    cols = st.columns([2, 3])  # Ticker input & Slider
+    cols = st.columns([2, 3])  # Ticker input & Amount input
 
     with cols[0]:
         ticker = st.text_input(f"Ticker {i+1}", value="MSFT" if i == 0 else "", key=f"ticker_{i}")
         tickers.append(ticker)
 
     with cols[1]:
-        amount = st.slider(
+        amount = st.number_input(
             f"Amount in {ticker if ticker else 'Asset'} ($)",
-            min_value=0, max_value=10000, value=1000, step=100,
-            key=f"amount_slider_{i}"  # use index instead of ticker
+            min_value=0.00, value=1000.00, step=0.01, format="%.2f",
+            key=f"amount_input_{i}",
+            help="Enter the exact dollar amount invested in this asset.",
         )
         amounts.append(amount)
 
@@ -100,11 +135,11 @@ st.line_chart(prices)
 
 st.text("")
 
-st.write(f"**{rolling_window}-Day Historical Volatility:**")
+st.write(f"**{rolling_window}-Day Historical Volatility (%):**")
 if historical_vol_df.empty:
     st.warning("Not enough data to compute rolling volatility for the selected window.")
 else:
-    st.line_chart(historical_vol_df)
+    st.line_chart(historical_vol_df * 100)
 
 st.write("Projected Annual Portfolio Return: ", portfolio_return(returns, weights))
 st.write("Projected Annual Portfolio Volatility: ", portfolio_volatility(returns, weights))
@@ -136,18 +171,157 @@ sharpe_ratio = compute_sharpe_ratio(p_return, p_volatility, risk_free_rate)
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.metric("Expected Annual Return: ", f"{p_return:.2%}")
+    st.metric(
+        "Expected Annual Return",
+        f"{p_return:.2%}",
+        help=(
+            "The projected annual return based on historical daily returns, "
+            "annualised over 252 trading days. "
+            "For reference, the S&P 500 has historically averaged ~10% per year. "
+            "Above 10% is strong; below 0% means the portfolio is losing money."
+        ),
+    )
 
 with col2:
-    st.metric("Annualised Volatility: ", f"{p_volatility:.2%}")
+    st.metric(
+        "Annualised Volatility",
+        f"{p_volatility:.2%}",
+        help=(
+            "How much the portfolio's value fluctuates over a year. "
+            "Lower is calmer. "
+            "For reference, the S&P 500 typically has ~15–20% annual volatility. "
+            "Below 10% is very stable (bond-like); above 30% is highly volatile."
+        ),
+    )
 
 with col3:
-    st.metric("Annualised Sharpe Ratio: ", f"{sharpe_ratio:.2f}")
+    st.metric(
+        "Annualised Sharpe Ratio",
+        f"{sharpe_ratio:.2f}",
+        help=(
+            "Return earned per unit of risk taken, after subtracting the risk-free rate. "
+            "Higher is better. "
+            "Below 0.5 → poor risk-adjusted returns. "
+            "0.5–1.0 → acceptable. "
+            "1.0–2.0 → good (most well-managed funds aim here). "
+            "Above 2.0 → excellent."
+        ),
+    )
 
 
 st.text("")
 st.text("")
-st.subheader("LSTM Voltaility Forecast")
+st.subheader("Downside Risk Analysis")
+st.write(
+    "Standard volatility penalises upside and downside equally. "
+    "These metrics focus specifically on losses — what investors "
+    "actually experience as risk."
+)
+
+ds = downside_metrics(returns, weights, risk_free_rate=risk_free_rate)
+
+ds_col1, ds_col2, ds_col3 = st.columns(3)
+with ds_col1:
+    sortino_val = ds["sortino_ratio"]
+    sortino_display = f"{sortino_val:.2f}" if np.isfinite(sortino_val) else "∞"
+    st.metric(
+        "Sortino Ratio",
+        sortino_display,
+        help=(
+            "Like Sharpe, but only penalises downside volatility — upside swings "
+            "don't count against you. Higher is better. "
+            "Below 1.0 → weak downside-adjusted returns. "
+            "1.0–2.0 → good. "
+            "Above 2.0 → excellent. "
+            "Example: A Sortino of 1.5 means you earn 1.5 units of return for "
+            "every unit of downside risk."
+        ),
+    )
+with ds_col2:
+    st.metric(
+        "Daily VaR (95%)",
+        f"{ds['var_daily']:.2%}",
+        help=(
+            "Value at Risk: with 95% confidence, your worst single-day loss "
+            "won't exceed this amount. "
+            "For a typical stock portfolio, daily VaR is usually 1–3%. "
+            "Example: A VaR of 2.0% on a $10,000 portfolio means on 95% of days "
+            "you won't lose more than $200. On the worst 5% of days, losses can be larger."
+        ),
+    )
+with ds_col3:
+    st.metric(
+        "Daily CVaR (95%)",
+        f"{ds['cvar_daily']:.2%}",
+        help=(
+            "Conditional VaR (Expected Shortfall): the average loss on the worst "
+            "5% of days. Always worse than VaR since it captures tail risk. "
+            "Typically 1.5–2x your VaR value. "
+            "Example: If CVaR is 3.0%, then on the worst 5% of trading days "
+            "your portfolio loses 3% on average."
+        ),
+    )
+
+ds_col4, ds_col5 = st.columns(2)
+with ds_col4:
+    st.metric(
+        "Max Drawdown",
+        f"{ds['max_drawdown']:.2%}",
+        help=(
+            "The largest peak-to-trough drop in portfolio value over the full "
+            "historical period. Shown as a negative percentage. "
+            "For reference, the S&P 500's max drawdown was about -34% during "
+            "the 2020 COVID crash and -57% during the 2008 financial crisis. "
+            "A max drawdown of -10% to -20% is typical for a diversified portfolio."
+        ),
+    )
+with ds_col5:
+    calmar_val = ds["calmar_ratio"]
+    calmar_display = f"{calmar_val:.2f}" if np.isfinite(calmar_val) else "N/A"
+    st.metric(
+        "Calmar Ratio",
+        calmar_display,
+        help=(
+            "Annual return divided by the absolute max drawdown. Measures how "
+            "much return you earn per unit of worst-case pain. Higher is better. "
+            "Below 0.5 → poor. "
+            "0.5–1.0 → decent. "
+            "1.0–3.0 → good. "
+            "Above 3.0 → excellent (high return relative to drawdown risk)."
+        ),
+    )
+
+
+# EXPECTED GAIN / EXPECTED LOSS
+st.text("")
+st.text("")
+st.subheader("Expected Gain vs Expected Loss")
+st.write(
+    "From MIT OCW Lecture 13 (Prof. Jake Xia): instead of relying on "
+    "volatility, assess each asset by its **Expected Gain** (average up-day "
+    "return) versus Expected Loss (average down-day loss). The Skill "
+    "Ratio maps directly to optimal position sizing — positive means "
+    "the asset has positive expected value."
+)
+
+gl_table = compute_gl_table(returns, weights)
+gl_display = format_gl_table(gl_table)
+st.dataframe(gl_display, width='stretch', hide_index=True)
+
+# Interpretation guidance
+st.write("**How to read this table:**")
+st.markdown(
+    "- **G/L Ratio > 1.0** → the asset gains more on good days than it loses on bad days\n"
+    "- **Skill Ratio > 0** → the asset has positive expected value; higher = stronger edge\n"
+    "- **Skill Ratio < 0** → the asset is destroying capital on a risk-adjusted basis\n"
+    "- **Kelly Fraction** → approximate maximum allocation suggested by the Kelly Criterion\n"
+    "- **Win Rate** alone is misleading — a 40% win rate with G/L of 2.0 is highly profitable"
+)
+
+
+st.text("")
+st.text("")
+st.subheader("LSTM Volatility Forecast")
 
 # Allow user to choose which ticker to use
 selected_stock = st.selectbox("Select ticker for LSTM forecast", tickers)
@@ -179,13 +353,192 @@ else:
 
     # Plot
     forecast_graph, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(historical_vol.index, historical_vol, label="Historical Volatility", color="gray", alpha=0.7)
-    ax.plot(forecast_dates, forecast_line, color="blue", linestyle="--", label="Forecasted Volatility")
+    ax.plot(historical_vol.index, historical_vol * 100, label="Historical Volatility", color="gray", alpha=0.7)
+    ax.plot(forecast_dates, forecast_line * 100, color="blue", linestyle="--", label="Forecasted Volatility")
     ax.set_title(f"{selected_stock} Volatility Forecast ({len(predicted_vol)}-Day Horizon)")
-    ax.set_xlabel("Time (days)")
-    ax.set_ylabel("Volatility")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Daily Volatility (%)")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.2f}%"))
     ax.legend()
     st.pyplot(forecast_graph)
+
+
+st.text("")
+st.text("")
+st.subheader("Forecast-Driven Allocation")
+st.write(
+    "The LSTM forecast above is informational — this section makes it "
+    "**prescriptive**. It runs the volatility forecast across every asset, "
+    "builds a forward-looking covariance matrix, and feeds it into the "
+    "optimiser so your allocation reacts to *predicted* risk, not just "
+    "past risk."
+)
+
+# Run LSTM across all tickers
+with st.spinner("Forecasting volatility for all assets..."):
+    forecast_vols = forecast_all_vols(returns, forecaster, horizon=selected_forecast)
+
+# Show historical vs predicted vol comparison
+vol_comp = build_vol_comparison_table(returns, forecast_vols)
+vol_comp_display = format_vol_comparison(vol_comp)
+st.write("**Per-Asset Volatility: Historical vs Predicted**")
+st.dataframe(vol_comp_display, width='stretch', hide_index=True)
+
+# Let user pick forecast-driven strategy
+fc_col1, fc_col2 = st.columns(2)
+with fc_col1:
+    forecast_strategy = st.selectbox(
+        "Forecast-driven strategy",
+        [
+            "Forecast Min-Variance",
+            "Forecast Risk Parity",
+            "Volatility Targeting",
+        ],
+        help=(
+            "Min-Variance and Risk Parity use predicted vols in the covariance "
+            "matrix. Volatility Targeting scales your current exposure to hit "
+            "a target portfolio vol."
+        ),
+    )
+with fc_col2:
+    if forecast_strategy == "Volatility Targeting":
+        target_vol_pct = st.slider(
+            "Target annual volatility (%)",
+            min_value=5, max_value=40, value=15, step=1,
+            help=(
+                "The engine scales your portfolio exposure so the predicted "
+                "annual volatility matches this target. "
+                "5–10% → conservative (bond-like). "
+                "10–15% → moderate (balanced fund). "
+                "15–20% → typical equity exposure (S&P 500 range). "
+                "20%+ → aggressive."
+            ),
+        )
+        target_vol = target_vol_pct / 100.0
+    else:
+        fc_max_weight = st.slider(
+            "Max weight per asset (forecast)",
+            min_value=0.1, max_value=1.0, value=1.0, step=0.05,
+            key="fc_max_weight",
+            help=(
+                "Same as the optimiser cap, but applied to the forecast-driven allocation. "
+                "Lower values force diversification. 0.30–0.50 is a sensible range "
+                "for most portfolios."
+            ),
+        )
+
+# Run the selected forecast-driven strategy
+try:
+    if forecast_strategy == "Forecast Min-Variance":
+        fc_result = forecast_min_variance(returns, forecast_vols, max_weight=fc_max_weight)
+    elif forecast_strategy == "Forecast Risk Parity":
+        fc_result = forecast_risk_parity(returns, forecast_vols, max_weight=fc_max_weight)
+    else:
+        base_weights_dict = {t: w for t, w in zip(tickers, weights) if t}
+        fc_result = volatility_target_weights(
+            base_weights_dict, returns, forecast_vols, target_vol=target_vol,
+        )
+
+    # Display results
+    st.write(f"**{fc_result.get('method', forecast_strategy)} — Suggested Weights**")
+
+    # Build comparison: current vs forecast-driven
+    fc_tickers = [t for t in tickers if t]
+    fc_rows = []
+    for t in fc_tickers:
+        curr = {tk: w for tk, w in zip(tickers, weights) if tk}.get(t, 0.0)
+        fc_w = fc_result["weights"].get(t, 0.0)
+        fc_rows.append({
+            "Ticker": t,
+            "Current Weight": f"{curr:.2%}",
+            "Forecast Weight": f"{fc_w:.2%}",
+            "Delta": f"{fc_w - curr:+.2%}",
+        })
+    # Include cash row for vol targeting
+    if "Cash" in fc_result["weights"]:
+        fc_rows.append({
+            "Ticker": "Cash",
+            "Current Weight": "0.00%",
+            "Forecast Weight": f"{fc_result['weights']['Cash']:.2%}",
+            "Delta": f"+{fc_result['weights']['Cash']:.2%}",
+        })
+    st.dataframe(pd.DataFrame(fc_rows), width='stretch', hide_index=True)
+
+    # Performance metrics
+    fc_perf1, fc_perf2, fc_perf3 = st.columns(3)
+    with fc_perf1:
+        st.metric(
+            "Forecast Return",
+            f"{fc_result['annual_return']:.2%}",
+            delta=f"{fc_result['annual_return'] - p_return:+.2%}",
+            help=(
+                "Projected annual return using forecast-adjusted weights. "
+                "A positive delta means the forecast-driven allocation "
+                "is expected to outperform your current one."
+            ),
+        )
+    with fc_perf2:
+        st.metric(
+            "Forecast Volatility",
+            f"{fc_result['annual_volatility']:.2%}",
+            delta=f"{fc_result['annual_volatility'] - p_volatility:+.2%}",
+            delta_color="inverse",
+            help=(
+                "Predicted annual volatility using LSTM-adjusted covariance. "
+                "A negative (green) delta means lower predicted risk than your "
+                "current allocation."
+            ),
+        )
+    with fc_perf3:
+        st.metric(
+            "Forecast Sharpe",
+            f"{fc_result['sharpe']:.2f}",
+            delta=f"{fc_result['sharpe'] - sharpe_ratio:+.2f}",
+            help=(
+                "Risk-adjusted return of the forecast-driven allocation. "
+                "Above 1.0 is good, above 2.0 is excellent."
+            ),
+        )
+
+    # Extra info for volatility targeting
+    if "leverage" in fc_result:
+        lev_col1, lev_col2, lev_col3 = st.columns(3)
+        with lev_col1:
+            st.metric("Leverage Factor", f"{fc_result['leverage']:.2f}x")
+        with lev_col2:
+            st.metric("Cash Allocation", f"{fc_result['cash_weight']:.1%}")
+        with lev_col3:
+            st.metric(
+                "Predicted Port Vol",
+                f"{fc_result['predicted_port_vol']:.2%}",
+                help="The raw predicted vol before leverage scaling.",
+            )
+        if fc_result["leverage"] < 1.0:
+            st.info(
+                f"Predicted volatility ({fc_result['predicted_port_vol']:.1%}) exceeds your "
+                f"target ({fc_result['target_vol']:.1%}), so the engine reduces exposure to "
+                f"{fc_result['leverage']:.0%}x and parks {fc_result['cash_weight']:.1%} in cash."
+            )
+        elif fc_result["leverage"] > 1.01:
+            st.info(
+                f"Predicted volatility ({fc_result['predicted_port_vol']:.1%}) is below your "
+                f"target ({fc_result['target_vol']:.1%}), so the engine scales up to "
+                f"{fc_result['leverage']:.2f}x. Leverage above 1.0x requires margin."
+            )
+
+    # Risk contributions for forecast risk parity
+    if "risk_contributions" in fc_result:
+        st.write("**Forecast Risk Contributions (should be roughly equal):**")
+        rc_df = pd.DataFrame({
+            "Ticker": list(fc_result["risk_contributions"].keys()),
+            "Risk Contribution": [f"{v:.2%}" for v in fc_result["risk_contributions"].values()],
+        })
+        st.dataframe(rc_df, width='stretch', hide_index=True)
+
+except ValueError as e:
+    st.warning(f"Forecast-driven allocation requires at least 2 assets. ({e})")
+except Exception as e:
+    st.warning(f"Could not compute forecast-driven allocation: {e}")
 
 
 # Forecast volatility score
@@ -295,73 +648,251 @@ health_score_fig.update_layout(
 
 st.plotly_chart(health_score_fig)
 
-st.text("")
-st.text("")
-st.subheader("3D Volatility Surface")
 
-chosen_stock = st.selectbox("Select ticker for volatility surface", tickers)
-option_type = st.selectbox("Option Type", ("Call", "Put"), index=0)
-option_data = fetch_option_chain(chosen_stock, limit_expiries=5, option_type="call")
-if option_data.empty:
-    st.info("No option-chain data available to build a volatility surface.")
-else:
-    rf_rate = fetch_risk_free_rate()
-    option_data["implied_vol"] = option_data.apply(
-        lambda row: implied_volatility(
-            market_price=row["mid_price"],
-            spot=row["underlying_price"],
-            strike=row["strike"],
-            time_to_maturity=row["time_to_maturity"],
-            risk_free_rate=rf_rate,
-            option_type="call",
-        ),
-        axis=1,
+st.text("")
+st.text("")
+
+
+st.subheader("Portfolio Optimiser")
+st.write(
+    "Compare your current allocation against optimal "
+    "portfolios. Each strategy solves a different objective — pick the "
+    "one that matches your goals."
+)
+
+opt_col1, opt_col2 = st.columns(2)
+with opt_col1:
+    objective = st.selectbox(
+        "Optimisation objective",
+        [
+            "Minimum Variance",
+            "Maximum Sharpe Ratio",
+            "Risk Parity (Equal Risk Contribution)",
+            "Minimum CVaR (Tail-Risk)",
+        ],
     )
-    option_data = option_data.dropna(subset=["implied_vol"])
+with opt_col2:
+    max_weight_cap = st.slider(
+        "Max weight per asset",
+        min_value=0.1, max_value=1.0, value=1.0, step=0.05,
+        help=(
+            "Caps any single position to prevent over-concentration. "
+            "At 1.0 (default), the optimiser can put 100% in one asset if it wants. "
+            "At 0.5, no asset can exceed 50%. "
+            "At 0.25, no asset exceeds 25% — forces diversification. "
+            "A good starting point for most portfolios is 0.30–0.50."
+        ),
+    )
 
-    if option_data.empty:
-        st.warning("Could not compute implied vols for the available strikes.")
+# Run the selected optimiser
+try:
+    if objective == "Minimum Variance":
+        opt_result = min_variance_weights(returns, max_weight=max_weight_cap)
+    elif objective == "Maximum Sharpe Ratio":
+        opt_result = max_sharpe_weights(
+            returns, risk_free_rate=risk_free_rate, max_weight=max_weight_cap,
+        )
+    elif objective == "Risk Parity (Equal Risk Contribution)":
+        opt_result = risk_parity_weights(returns, max_weight=max_weight_cap)
     else:
-        m = option_data["moneyness"].values
-        t = option_data["time_to_maturity"].values
-        iv = option_data["implied_vol"].values
+        opt_result = min_cvar_weights(returns, max_weight=max_weight_cap)
 
-        m_grid = np.linspace(m.min(), m.max(), 40)
-        t_grid = np.linspace(t.min(), t.max(), 40)
-        M, T = np.meshgrid(m_grid, t_grid)
-        surface = griddata((m, t), iv, (M, T), method="linear")
+    # Build comparison table
+    current_weights_dict = {t: w for t, w in zip(tickers, weights) if t}
+    comparison_df = compare_portfolios(current_weights_dict, opt_result, [t for t in tickers if t])
 
-        surface_fig = go.Figure()
-        surface_fig.add_trace(
-            go.Surface(
-                x=M,
-                y=T,
-                z=surface,
-                colorscale="Viridis",
-                showscale=True,
-                opacity=0.85,
-                name="IV Surface",
-            )
-        )
-        surface_fig.add_trace(
-            go.Scatter3d(
-                x=m,
-                y=t,
-                z=iv,
-                mode="markers",
-                marker=dict(size=4, color="white"),
-                name="Observed",
-                hovertemplate="Moneyness: %{x:.2f}<br>T (yrs): %{y:.2f}<br>IV: %{z:.2%}<extra></extra>",
-            )
-        )
-        surface_fig.update_layout(
-            title=f"{chosen_stock} {option_type} Option Implied Volatility Surface",
-            scene=dict(
-                xaxis_title="Moneyness (K / S)",
-                yaxis_title="Time to Maturity (years)",
-                zaxis_title="Implied Volatility",
+    # Format for display
+    display_df = comparison_df.copy()
+    display_df["Current Weight"] = display_df["Current Weight"].map("{:.2%}".format)
+    display_df["Optimised Weight"] = display_df["Optimised Weight"].map("{:.2%}".format)
+    display_df["Delta"] = comparison_df["Delta"].map(lambda d: f"{d:+.2%}")
+    st.dataframe(display_df, width='stretch', hide_index=True)
+
+    # Performance comparison
+    perf_col1, perf_col2, perf_col3 = st.columns(3)
+    with perf_col1:
+        st.metric(
+            "Optimised Return",
+            f"{opt_result['annual_return']:.2%}",
+            delta=f"{opt_result['annual_return'] - p_return:+.2%}",
+            help=(
+                "The projected annual return of the optimised portfolio. "
+                "A positive green delta means the optimiser found a higher-returning "
+                "allocation than your current one."
             ),
-            height=800,  # increase vertical space
-            margin=dict(l=30, r=30, t=70, b=50)
         )
-        st.plotly_chart(surface_fig, use_container_width=True)
+    with perf_col2:
+        st.metric(
+            "Optimised Volatility",
+            f"{opt_result['annual_volatility']:.2%}",
+            delta=f"{opt_result['annual_volatility'] - p_volatility:+.2%}",
+            delta_color="inverse",  # lower vol is better
+            help=(
+                "The predicted annual volatility of the optimised portfolio. "
+                "Here, a negative (green) delta is good — it means the optimiser "
+                "found a less volatile allocation than your current one."
+            ),
+        )
+    with perf_col3:
+        st.metric(
+            "Optimised Sharpe",
+            f"{opt_result['sharpe']:.2f}",
+            delta=f"{opt_result['sharpe'] - sharpe_ratio:+.2f}",
+            help=(
+                "The Sharpe ratio of the optimised portfolio. "
+                "A positive green delta means better risk-adjusted returns. "
+                "Target: above 1.0 is good, above 2.0 is excellent."
+            ),
+        )
+
+    # Risk contributions (only for Risk Parity)
+    if "risk_contributions" in opt_result:
+        st.write("**Risk Contributions (should be roughly equal):**")
+        rc_df = pd.DataFrame({
+            "Ticker": list(opt_result["risk_contributions"].keys()),
+            "Risk Contribution": [f"{v:.2%}" for v in opt_result["risk_contributions"].values()],
+        })
+        st.dataframe(rc_df, width='stretch', hide_index=True)
+
+    # CVaR info (only for Min CVaR)
+    if "cvar_daily" in opt_result:
+        st.write(
+            f"**Daily CVaR (95%):** {opt_result['cvar_daily']:.4%} — "
+            f"On the worst 5% of days, the average loss is {opt_result['cvar_daily']:.2%}."
+        )
+
+
+    st.text("")
+    st.write("**Efficient Frontier**")
+    st.write(
+        "The curve shows the best achievable return for every level of risk. "
+        "Your current portfolio is marked in red; the optimised portfolio in green."
+    )
+
+    with st.spinner("Computing efficient frontier..."):
+        frontier_df = compute_efficient_frontier(
+            returns,
+            risk_free_rate=risk_free_rate,
+            n_points=40,
+            max_weight=max_weight_cap,
+        )
+
+    if not frontier_df.empty:
+        frontier_fig = go.Figure()
+
+        # Frontier curve
+        frontier_fig.add_trace(go.Scatter(
+            x=frontier_df["volatility"],
+            y=frontier_df["target_return"],
+            mode="lines",
+            name="Efficient Frontier",
+            line=dict(color="royalblue", width=2),
+        ))
+
+        # Current portfolio marker
+        frontier_fig.add_trace(go.Scatter(
+            x=[p_volatility],
+            y=[p_return],
+            mode="markers+text",
+            name="Your Portfolio",
+            marker=dict(color="red", size=12, symbol="circle"),
+            text=["You"],
+            textposition="top right",
+        ))
+
+        # Optimised portfolio marker
+        frontier_fig.add_trace(go.Scatter(
+            x=[opt_result["annual_volatility"]],
+            y=[opt_result["annual_return"]],
+            mode="markers+text",
+            name="Optimised",
+            marker=dict(color="limegreen", size=12, symbol="diamond"),
+            text=["Optimal"],
+            textposition="top right",
+        ))
+
+        frontier_fig.update_layout(
+            xaxis_title="Annualised Volatility",
+            yaxis_title="Annualised Return",
+            xaxis=dict(tickformat=".1%"),
+            yaxis=dict(tickformat=".1%"),
+            height=500,
+            showlegend=True,
+        )
+        st.plotly_chart(frontier_fig, width='stretch')
+    else:
+        st.warning("Could not compute efficient frontier for the selected assets.")
+
+    # REBALANCING ENGINE
+    st.text("")
+    st.text("")
+    st.subheader("Rebalancing Engine")
+    st.write(
+        "The MIT lecture emphasises that diversification is only a free lunch "
+        "if you rebalance — otherwise winners dominate, losers shrink, and "
+        "the correlation benefit disappears. This section shows exactly what "
+        "trades to execute to reach the optimised allocation above."
+    )
+
+    rebal_threshold = st.slider(
+        "Drift threshold for rebalancing (%)",
+        min_value=1.0, max_value=20.0, value=5.0, step=1.0,
+        help=(
+            "The percentage your portfolio must drift from target before rebalancing "
+            "is triggered. Drift is measured as the total weight that needs to move. "
+            "Example: if you hold 40% AAPL but the target is 25%, that's 15% drift "
+            "on that one asset alone."
+        ),
+    ) / 100.0
+
+    st.caption(
+        "💡 **Recommended:** 3–5% for active investors who want tight tracking. "
+        "5–10% for most people — balances accuracy with lower trading costs. "
+        "10–20% for buy-and-hold investors who want to minimise trading."
+    )
+
+    # Compute drift: current weights vs optimizer target weights
+    target_weights_dict = opt_result["weights"]
+    drift_df = compute_drift(current_weights_dict, target_weights_dict)
+    portfolio_drift = total_drift(drift_df)
+    should_rebalance = needs_rebalancing(drift_df, threshold=rebal_threshold)
+
+    # Drift summary
+    if should_rebalance:
+        st.warning(
+            f"⚠️ Portfolio drift is **{portfolio_drift:.1%}** — exceeds your "
+            f"{rebal_threshold:.0%} threshold. Rebalancing recommended."
+        )
+    else:
+        st.success(
+            f"✅ Portfolio drift is **{portfolio_drift:.1%}** — within your "
+            f"{rebal_threshold:.0%} threshold. No rebalancing needed."
+        )
+
+    # Drift detail table
+    st.write("**Drift Analysis**")
+    drift_display = format_drift_table(drift_df)
+    st.dataframe(drift_display, width='stretch', hide_index=True)
+
+    # Trade list (always show, regardless of threshold)
+    st.write("**Trade List**")
+    st.write(
+        f"Based on a total portfolio value of **${total_amount:,.0f}**, "
+        "these are the trades needed to reach the optimised allocation:"
+    )
+    trade_df = generate_trade_list(drift_df, total_portfolio_value=total_amount)
+    if trade_df.empty:
+        st.info("No trades needed — your portfolio matches the target allocation.")
+    else:
+        trade_display = format_trade_list(trade_df)
+        st.dataframe(trade_display, width='stretch', hide_index=True)
+
+        # Total turnover
+        total_traded = trade_df["Amount ($)"].sum() / 2  # each dollar moves once
+        st.write(
+            f"**Total turnover:** ${total_traded:,.2f} "
+            f"({total_traded / total_amount:.1%} of portfolio)"
+        )
+
+except ValueError as e:
+    st.warning(f"Optimisation requires at least 2 assets with valid data. ({e})")
