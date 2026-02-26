@@ -245,8 +245,8 @@ with ds_col2:
             "Value at Risk: with 95% confidence, your worst single-day loss "
             "won't exceed this amount. "
             "For a typical stock portfolio, daily VaR is usually 1–3%. "
-            "Example: A VaR of 2.0% on a $10,000 portfolio means on 95% of days "
-            "you won't lose more than $200. On the worst 5% of days, losses can be larger."
+            "Example: A VaR of 2.0% on a 10,000 dollar portfolio means on 95% of days "
+            "you won't lose more than 200 dollars. On the worst 5% of days, losses can be larger."
         ),
     )
 with ds_col3:
