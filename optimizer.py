@@ -23,6 +23,7 @@ def min_variance_weights(
     returns: pd.DataFrame,
     max_weight: float = 1.0,
     long_only: bool = True,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Find weights that minimise portfolio variance.
@@ -54,7 +55,7 @@ def min_variance_weights(
         "weights": dict(zip(returns.columns, weights)),
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
     }
 
 
@@ -104,6 +105,7 @@ def max_sharpe_weights(
 def risk_parity_weights(
     returns: pd.DataFrame,
     max_weight: float = 1.0,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Find weights so that each asset contributes equally to total
@@ -150,7 +152,7 @@ def risk_parity_weights(
         "weights": dict(zip(returns.columns, weights)),
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
         "risk_contributions": dict(zip(returns.columns, rc_pct)),
     }
 
@@ -161,6 +163,7 @@ def min_cvar_weights(
     target_return: float | None = None,
     max_weight: float = 1.0,
     long_only: bool = True,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Find weights that minimise CVaR (Expected Shortfall) at confidence
@@ -220,7 +223,7 @@ def min_cvar_weights(
         "weights": dict(zip(returns.columns, weights)),
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
         "cvar_daily": cvar_value,
         "cvar_annualised": cvar_value * np.sqrt(252),
     }

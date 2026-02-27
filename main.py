@@ -5,9 +5,10 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import pandas as pd
 from data_pipeline import (
-    fetch_ticker_data, 
-    calculate_returns, 
-    fetch_risk_free_rate
+    fetch_ticker_data,
+    calculate_returns,
+    fetch_risk_free_rate,
+    fetch_exchange_rates,
 )
 from risk_analysis import (
     portfolio_return, 
@@ -41,17 +42,36 @@ from forecast_allocation import (
     volatility_target_weights,
     build_vol_comparison_table,
     format_vol_comparison,
+    build_forecast_covariance,
 )
 from backtester import (
     simulate_portfolio,
     compute_backtest_stats,
     build_comparison_stats,
 )
+from asset_suggester import (
+    build_candidate_returns,
+    screen_candidates,
+    allocate_suggestions,
+    CANDIDATE_UNIVERSE,
+)
 
 @st.cache_resource
 def get_forecaster():
     # Cache the pre-trained LSTM so the app only loads weights once per session.
     return load_forecaster(device="cpu")
+
+SUPPORTED_CURRENCIES = ["USD", "CAD", "EUR", "GBP", "CHF", "AUD", "JPY", "HKD", "NZD", "SEK", "NOK", "DKK", "MXN", "SGD"]
+
+@st.cache_data(ttl=3600)
+def get_exchange_rates(currencies_tuple: tuple) -> dict:
+    # Cache rates for 1 hour so repeated rerenders don't hammer Yahoo Finance.
+    return fetch_exchange_rates(list(currencies_tuple))
+
+@st.cache_data(ttl=3600)
+def get_candidate_returns(existing_tickers_tuple: tuple) -> pd.DataFrame:
+    # Cache candidate returns for 1 hour, keyed on the current portfolio's tickers.
+    return build_candidate_returns(list(existing_tickers_tuple))
 
 # Function to make gradient health score scale
 def gradient_steps(n=100):
@@ -80,23 +100,37 @@ st.subheader("Enter Portfolio Assets")
 
 tickers = []
 amounts = []
+currencies = []
 
-num_assets = st.number_input("How many assets are in your portfolio?", min_value = 1, max_value = 20, value = 1, step = 1)
+num_assets = st.number_input("How many assets are in your portfolio?", min_value=1, max_value=20, value=1, step=1)
+
+# Column headers
+h0, h1, h2 = st.columns([2, 1, 3])
+with h0:
+    st.caption("Ticker")
+with h1:
+    st.caption("Currency")
+with h2:
+    st.caption("Amount Invested")
 
 for i in range(num_assets):
-
-    cols = st.columns([2, 3])  # Ticker input & Amount input
+    cols = st.columns([2, 1, 3])
 
     with cols[0]:
-        ticker = st.text_input(f"Ticker {i+1}", value="MSFT" if i == 0 else "", key=f"ticker_{i}")
+        ticker = st.text_input(f"Ticker {i+1}", value="MSFT" if i == 0 else "", key=f"ticker_{i}", label_visibility="collapsed")
         tickers.append(ticker)
 
     with cols[1]:
+        currency = st.selectbox(f"Currency {i+1}", SUPPORTED_CURRENCIES, key=f"currency_{i}", label_visibility="collapsed")
+        currencies.append(currency)
+
+    with cols[2]:
         amount = st.number_input(
-            f"Amount in {ticker if ticker else 'Asset'} ($)",
+            f"Amount {i+1}",
             min_value=0.00, value=1000.00, step=0.01, format="%.2f",
             key=f"amount_input_{i}",
-            help="Enter the exact dollar amount invested in this asset.",
+            label_visibility="collapsed",
+            help=f"Enter the amount invested in this asset in {currency}.",
         )
         amounts.append(amount)
 
@@ -119,13 +153,39 @@ if duplicates:
     st.error(f"Duplicate tickers detected: {', '.join(sorted(duplicates))}. Please use each symbol only once.")
     st.stop()
 
-total_amount = sum(amounts)
-weights = [amt / total_amount for amt in amounts] if total_amount > 0 else [0] * len(amounts)
+# Fetch live exchange rates for any non-USD currencies in the portfolio
+unique_foreign = tuple(sorted(set(c for c in currencies if c != "USD")))
+if unique_foreign:
+    with st.spinner("Fetching live exchange rates..."):
+        rates = get_exchange_rates(("USD",) + unique_foreign)
+    failed = rates.get("_failed", [])
+    if failed:
+        st.warning(
+            f"Could not fetch live rates for: {', '.join(failed)}. "
+            "Amounts in those currencies are treated as USD. Check your connection."
+        )
+else:
+    rates = {"USD": 1.0}
 
-st.write("**Portfolio Weights:**")
-for t, w in zip(tickers, weights):
-    if t: # Skip empty slots
-        st.write(f"{t}: {w:.2%}")
+# Convert every amount to USD for weight normalisation
+usd_amounts = [amt * rates.get(curr, 1.0) for amt, curr in zip(amounts, currencies)]
+total_usd = sum(usd_amounts)
+weights = [usd / total_usd for usd in usd_amounts] if total_usd > 0 else [0.0] * len(usd_amounts)
+
+# Show weights with currency conversion details
+st.write("**Portfolio Weights (normalised to USD):**")
+for t, w, amt, curr, usd_amt in zip(tickers, weights, amounts, currencies, usd_amounts):
+    if t:
+        if curr != "USD":
+            rate = rates.get(curr, 1.0)
+            st.write(f"**{t}:** {w:.2%}  —  {amt:,.2f} {curr} × {rate:.4f} = ${usd_amt:,.2f} USD")
+        else:
+            st.write(f"**{t}:** {w:.2%}  —  ${amt:,.2f} USD")
+
+if unique_foreign:
+    rate_strs = [f"1 {c} = {rates[c]:.4f} USD" for c in unique_foreign if c not in rates.get("_failed", [])]
+    if rate_strs:
+        st.caption("Live rates (cached 1 hr): " + "  |  ".join(rate_strs))
 
 prices = fetch_ticker_data(tickers)
 returns = calculate_returns(prices)
@@ -423,7 +483,7 @@ with fc_col2:
     else:
         fc_max_weight = st.slider(
             "Max weight per asset (forecast)",
-            min_value=0.1, max_value=1.0, value=1.0, step=0.05,
+            min_value=0.1, max_value=1.0, value=0.5, step=0.05,
             key="fc_max_weight",
             help=(
                 "Same as the optimiser cap, but applied to the forecast-driven allocation. "
@@ -432,16 +492,42 @@ with fc_col2:
             ),
         )
 
+_FORECAST_STRATEGY_INFO = {
+    "Forecast Min-Variance": (
+        "**Forecast Min-Variance** works like the standard Minimum Variance optimiser, but replaces "
+        "historical volatilities with the LSTM's predictions. If the model expects one asset's risk "
+        "to rise, its weight is reduced *before* the spike happens. "
+        "**Best for:** investors who want a forward-looking low-risk allocation and believe near-term "
+        "volatility will differ meaningfully from the 5-year average."
+    ),
+    "Forecast Risk Parity": (
+        "**Forecast Risk Parity** equalises risk contributions using *predicted* volatilities instead of "
+        "historical ones. An asset the LSTM expects to become more volatile automatically loses weight, "
+        "keeping the risk balance intact going forward. "
+        "**Best for:** long-term balanced investors who also want the portfolio to adapt to upcoming "
+        "risk changes rather than reacting after the fact."
+    ),
+    "Volatility Targeting": (
+        "**Volatility Targeting** does not change *which* assets you hold — it scales your overall "
+        "exposure up or down to keep predicted portfolio volatility near your chosen target. "
+        "When the LSTM forecasts rising volatility, the engine reduces exposure and parks the remainder "
+        "in cash. When it forecasts calm markets, it scales back up (up to 1.5×). "
+        "**Best for:** investors with a specific risk budget (e.g. 'I want no more than 12% annual vol') "
+        "who prefer to stay in their current assets rather than switch to a new allocation."
+    ),
+}
+st.info(_FORECAST_STRATEGY_INFO[forecast_strategy])
+
 # Run the selected forecast-driven strategy
 try:
     if forecast_strategy == "Forecast Min-Variance":
-        fc_result = forecast_min_variance(returns, forecast_vols, max_weight=fc_max_weight)
+        fc_result = forecast_min_variance(returns, forecast_vols, max_weight=fc_max_weight, risk_free_rate=risk_free_rate)
     elif forecast_strategy == "Forecast Risk Parity":
-        fc_result = forecast_risk_parity(returns, forecast_vols, max_weight=fc_max_weight)
+        fc_result = forecast_risk_parity(returns, forecast_vols, max_weight=fc_max_weight, risk_free_rate=risk_free_rate)
     else:
         base_weights_dict = {t: w for t, w in zip(tickers, weights) if t}
         fc_result = volatility_target_weights(
-            base_weights_dict, returns, forecast_vols, target_vol=target_vol,
+            base_weights_dict, returns, forecast_vols, target_vol=target_vol, risk_free_rate=risk_free_rate,
         )
 
     # Display results
@@ -547,24 +633,21 @@ except Exception as e:
 
 
 # Forecast volatility score
-# Based on LSTM model
-# Take predicted volatility for the selected forecast horizon
-pred_vol_forecast = float(
-    np.nan_to_num(predicted_vol[-1], nan=0.0, posinf=1.0, neginf=0.0)
-)
-hist_median = float(historical_vol.median())
-hist_std = float(historical_vol.std(ddof=0))
-
-if hist_std <= 1e-6:
-    fvs = 40.0
-else:
-    z_score = (pred_vol_forecast - hist_median) / hist_std
-    fvs = float(np.clip(50 - 35 * z_score, 0, 100))
+# Uses portfolio-level predicted annual vol (absolute, not relative z-score).
+# Low predicted vol → high score; high predicted vol → low score.
+# Anchored at 0 for ~67%+ annual vol, 100 for near-zero vol.
+weights_arr = np.array(weights, dtype=float)
+try:
+    cov_fc = build_forecast_covariance(returns.dropna(), forecast_vols)
+    pred_port_daily_var = float(np.dot(weights_arr, np.dot(cov_fc, weights_arr)))
+    pred_port_annual_vol = np.sqrt(max(pred_port_daily_var, 0.0)) * np.sqrt(252)
+except Exception:
+    pred_port_annual_vol = p_volatility  # fallback to historical portfolio vol
+fvs = float(np.clip(100 - pred_port_annual_vol * 150, 0, 100))
 
 
 # Rolling volatility score
-# Based on last 30-day volatility
-weights_arr = np.array(weights, dtype=float)
+# Uses portfolio's current 30-day rolling vol (absolute annualised level).
 aligned_returns = returns.dropna()
 if aligned_returns.empty or np.isclose(weights_arr.sum(), 0.0):
     rvs = 50.0
@@ -575,23 +658,17 @@ else:
         rvs = 50.0
     else:
         current_vol = float(hist_port_vol.iloc[-1])
-        vol_mean = float(hist_port_vol.mean())
-        vol_std = float(hist_port_vol.std(ddof=0))
-        if vol_std <= 1e-6:
-            z_score = 0.0
-        else:
-            z_score = (current_vol - vol_mean) / vol_std
-        rvs = float(np.clip(50 - 45 * z_score, 0, 100))
+        current_annual_vol = current_vol * np.sqrt(252)
+        rvs = float(np.clip(100 - current_annual_vol * 150, 0, 100))
 
 
 # Sharpe Ratio score
+# tanh(sharpe) maps: -2→~0, -1→12, 0→50, 1→88, 2→~100
 sharpe_clean = float(np.nan_to_num(sharpe_ratio, nan=0.0))
-ss = float(np.clip(50 + 40 * np.tanh(sharpe_clean * 3.0), 0, 100))
+ss = float(np.clip(50 + 50 * np.tanh(sharpe_clean), 0, 100))
 
 # Max Drawdown score
-# Drawdown measures the largest drop in value of portfolio from it's peak
-# Max Drawdowns essentially let an investor know what the historically max amount of money
-# they can lose from a peak (drawdown = peak-to-trough)
+# 0% drawdown → 100; -67% drawdown → 0. Fixes the old formula's ceiling of 85.
 weights_arr = np.array(weights, dtype=float)
 aligned_returns = returns.dropna()
 if aligned_returns.empty or np.isclose(weights_arr.sum(), 0.0):
@@ -602,11 +679,11 @@ else:
     running_max = cumulative.cummax()
     drawdown = (cumulative - running_max) / running_max
     max_drawdown = float(drawdown.min())
-dds = float(np.clip(85 + max_drawdown * 180, 0, 100))
+dds = float(np.clip(100 + max_drawdown * 150, 0, 100))
 
 # Concentration penalty (100 means fully diversified and 0 means fully concentrated)
 # Rewards diversification (Modern Portfolio Theory encourages diversification)
-weights_arr = np.array(weights, dtype = float)
+weights_arr = np.array(weights, dtype=float)
 if len(weights_arr) <= 1:
     cp = 0.0
 else:
@@ -614,10 +691,12 @@ else:
     cp = float(np.clip(entropy, 0, 1) * 100)
 
 
-# Gives more importance for different factors
-# Forecast volume has most weight (most impact on health score) // 0.35
-# Concentration penalty has least weight (least impact on health score) // 0.10
-health_score = 0.20*fvs + 0.20*rvs + 0.30*ss + 0.15*dds + 0.15*cp
+# Component weights:
+# fvs/rvs: 20% each — absolute vol punishes genuinely risky portfolios
+# ss: 20% — Sharpe matters but shouldn't override severe drawdown/vol signals
+# dds: 25% — drawdown is the most visceral risk for investors
+# cp: 15% — diversification bonus
+health_score = 0.20*fvs + 0.20*rvs + 0.20*ss + 0.25*dds + 0.15*cp
 health_score = float(np.nan_to_num(health_score, nan=0.0, posinf=100.0, neginf=0.0))
 
 
@@ -679,7 +758,7 @@ with opt_col1:
 with opt_col2:
     max_weight_cap = st.slider(
         "Max weight per asset",
-        min_value=0.1, max_value=1.0, value=1.0, step=0.05,
+        min_value=0.1, max_value=1.0, value=0.5, step=0.05,
         help=(
             "Caps any single position to prevent over-concentration. "
             "At 1.0 (default), the optimiser can put 100% in one asset if it wants. "
@@ -689,18 +768,51 @@ with opt_col2:
         ),
     )
 
+_OBJECTIVE_INFO = {
+    "Minimum Variance": (
+        "**Minimum Variance** finds the allocation with the lowest possible portfolio volatility, "
+        "regardless of expected returns. It only needs the covariance matrix — no return forecasts — "
+        "making it the most robust strategy. "
+        "**Best for:** risk-averse investors whose primary goal is a smooth, low-volatility ride. "
+        "It often over-weights bonds or low-vol assets heavily."
+    ),
+    "Maximum Sharpe Ratio": (
+        "**Maximum Sharpe Ratio** maximises return earned per unit of risk taken (after subtracting "
+        "the risk-free rate). It aims for the single best risk-adjusted allocation on the efficient frontier. "
+        "**Best for:** investors who are confident historical return patterns will continue and want "
+        "the most efficient trade-off between return and risk. "
+        "**Caution:** most sensitive to return estimation errors — one historically strong asset can "
+        "dominate the portfolio."
+    ),
+    "Risk Parity (Equal Risk Contribution)": (
+        "**Risk Parity** allocates weights so that every asset contributes *equally* to total portfolio risk. "
+        "Lower-volatility assets (e.g. bonds) receive more weight; higher-volatility assets receive less. "
+        "Like Minimum Variance, it requires no return forecasts. "
+        "**Best for:** long-term, balanced investors who want diversification in risk terms, not just dollar terms. "
+        "A popular choice among institutional allocators."
+    ),
+    "Minimum CVaR (Tail-Risk)": (
+        "**Minimum CVaR** minimises the *average loss* on the worst 5% of trading days (Expected Shortfall). "
+        "Unlike the other strategies, it does not assume returns are normally distributed — it works directly "
+        "from the historical loss distribution. "
+        "**Best for:** investors who are especially sensitive to large, sudden drawdowns and want the "
+        "portfolio that causes the least damage in a genuine market crisis."
+    ),
+}
+st.info(_OBJECTIVE_INFO[objective])
+
 # Run the selected optimiser
 try:
     if objective == "Minimum Variance":
-        opt_result = min_variance_weights(returns, max_weight=max_weight_cap)
+        opt_result = min_variance_weights(returns, max_weight=max_weight_cap, risk_free_rate=risk_free_rate)
     elif objective == "Maximum Sharpe Ratio":
         opt_result = max_sharpe_weights(
             returns, risk_free_rate=risk_free_rate, max_weight=max_weight_cap,
         )
     elif objective == "Risk Parity (Equal Risk Contribution)":
-        opt_result = risk_parity_weights(returns, max_weight=max_weight_cap)
+        opt_result = risk_parity_weights(returns, max_weight=max_weight_cap, risk_free_rate=risk_free_rate)
     else:
-        opt_result = min_cvar_weights(returns, max_weight=max_weight_cap)
+        opt_result = min_cvar_weights(returns, max_weight=max_weight_cap, risk_free_rate=risk_free_rate)
 
     # Build comparison table
     current_weights_dict = {t: w for t, w in zip(tickers, weights) if t}
@@ -828,6 +940,145 @@ try:
     else:
         st.warning("Could not compute efficient frontier for the selected assets.")
 
+    # ASSET SUGGESTIONS
+    st.text("")
+    st.text("")
+    st.subheader("Asset Suggestions")
+    st.write(
+        "This section screens a universe of ~40 "
+        "liquid ETFs across every major asset class and recommends the ones that would best "
+        "complement your portfolio based on your chosen objective. "
+    )
+
+    _sugg_obj_col, _sugg_cap_col = st.columns([2, 1])
+    with _sugg_obj_col:
+        sugg_objective_label = st.selectbox(
+            "Your objective",
+            [
+                "Best Risk-Adjusted Return",
+                "Maximize Diversification",
+                "Maximize Returns",
+                "Maximize Stability",
+            ],
+            key="sugg_objective",
+        )
+    with _sugg_cap_col:
+        _sugg_max_pct = st.slider(
+            "Max weight per new asset",
+            min_value=5,
+            max_value=50,
+            value=20,
+            step=5,
+            format="%d%%",
+            key="sugg_max_weight",
+            help="Caps how much of your portfolio the optimiser can assign to any single new asset.",
+        )
+        sugg_max_weight = _sugg_max_pct / 100
+
+    _SUGG_OBJ_MAP = {
+        "Best Risk-Adjusted Return": "sharpe",
+        "Maximize Diversification":  "diversify",
+        "Maximize Returns":          "returns",
+        "Maximize Stability":        "stability",
+    }
+    _sugg_obj_key = _SUGG_OBJ_MAP[sugg_objective_label]
+
+    # Detect whether stored results are stale (portfolio or objective changed)
+    _sugg_state = st.session_state.get("sugg_results", None)
+    _sugg_stale = (
+        _sugg_state is None
+        or _sugg_state.get("tickers") != tuple(sorted(tickers))
+        or _sugg_state.get("objective") != _sugg_obj_key
+        or _sugg_state.get("max_weight") != sugg_max_weight
+    )
+
+    if _sugg_stale and _sugg_state is not None:
+        st.warning(
+            "Portfolio, objective, or weight cap has changed — click **Find Suggestions** to refresh."
+        )
+
+    if st.button("Find Suggestions", key="run_sugg_btn"):
+        with st.spinner(
+            "Downloading ETF data and running joint optimisation… "
+            "This may take up to 60 seconds on the first run."
+        ):
+            _cand_returns = get_candidate_returns(tuple(sorted(tickers)))
+
+            if _cand_returns.empty:
+                st.session_state["sugg_results"] = {
+                    "tickers": tuple(sorted(tickers)),
+                    "objective": _sugg_obj_key,
+                    "max_weight": sugg_max_weight,
+                    "df": pd.DataFrame(),
+                    "n_candidates": 0,
+                    "message": "Your portfolio already covers the full suggestion universe.",
+                }
+            else:
+                _n_candidates = _cand_returns.shape[1]
+                _shortlist, _trial_metrics = screen_candidates(
+                    candidate_returns=_cand_returns,
+                    portfolio_returns=returns.dropna(),
+                    weights=weights,
+                    risk_free_rate=risk_free_rate,
+                    objective=_sugg_obj_key,
+                )
+
+                if not _shortlist:
+                    _sugg_df = pd.DataFrame()
+                    _msg = "No candidates showed meaningful improvement for this objective."
+                else:
+                    _sugg_df = allocate_suggestions(
+                        shortlisted_tickers=_shortlist,
+                        trial_metrics=_trial_metrics,
+                        candidate_returns=_cand_returns,
+                        portfolio_returns=returns.dropna(),
+                        current_weights_dict=current_weights_dict,
+                        risk_free_rate=risk_free_rate,
+                        objective=_sugg_obj_key,
+                        max_weight=sugg_max_weight,
+                    )
+                    _msg = "" if not _sugg_df.empty else "No candidates showed meaningful improvement for this objective."
+
+                st.session_state["sugg_results"] = {
+                    "tickers": tuple(sorted(tickers)),
+                    "objective": _sugg_obj_key,
+                    "max_weight": sugg_max_weight,
+                    "df": _sugg_df,
+                    "n_candidates": _n_candidates,
+                    "message": _msg,
+                }
+
+    # Display stored results (persists across rerenders)
+    _sugg_state = st.session_state.get("sugg_results", None)
+    if _sugg_state is not None:
+        if _sugg_state.get("message"):
+            st.info(_sugg_state["message"])
+        elif not _sugg_state["df"].empty:
+            _sugg_display = _sugg_state["df"].copy()
+            _sugg_display["Suggested Weight"] = _sugg_display["Suggested Weight"].map(
+                lambda x: f"{x:.1%}"
+            )
+            _sugg_display["Δ Sharpe (trial)"] = _sugg_display["Δ Sharpe (trial)"].map(
+                lambda x: f"{x:+.3f}" if np.isfinite(x) else "—"
+            )
+            _sugg_display["Δ Vol (trial)"] = _sugg_display["Δ Vol (trial)"].map(
+                lambda x: f"{x:+.2%}" if np.isfinite(x) else "—"
+            )
+            st.dataframe(_sugg_display, width='stretch', hide_index=True)
+
+            st.caption(
+                f"Evaluated {_sugg_state['n_candidates']} candidate ETFs. "
+                "Δ Sharpe and Δ Vol are computed by blending each asset at a 10% trial weight — "
+                "they show directional impact, not the final joint-optimised impact."
+            )
+            st.info(
+                "To invest in a suggested asset, add its ticker at the top of the page "
+                "and re-run the Optimiser to see the full joint allocation."
+            )
+            st.caption(
+                "Based on 5-year historical data. Past performance does not guarantee future results."
+            )
+
     # REBALANCING ENGINE
     st.text("")
     st.text("")
@@ -882,10 +1133,10 @@ try:
     # Trade list (always show, regardless of threshold)
     st.write("**Trade List**")
     st.write(
-        f"Based on a total portfolio value of **${total_amount:,.0f}**, "
+        f"Based on a total portfolio value of **${total_usd:,.0f}**, "
         "these are the trades needed to reach the optimised allocation:"
     )
-    trade_df = generate_trade_list(drift_df, total_portfolio_value=total_amount)
+    trade_df = generate_trade_list(drift_df, total_portfolio_value=total_usd)
     if trade_df.empty:
         st.info("No trades needed — your portfolio matches the target allocation.")
     else:
@@ -896,7 +1147,7 @@ try:
         total_traded = trade_df["Amount ($)"].sum() / 2  # each dollar moves once
         st.write(
             f"**Total turnover:** ${total_traded:,.2f} "
-            f"({total_traded / total_amount:.1%} of portfolio)"
+            f"({total_traded / total_usd:.1%} of portfolio)"
         )
 
 
@@ -906,20 +1157,65 @@ try:
     st.subheader("Backtest: Your Weights vs Optimised")
     st.write(
         "This section simulates what would have happened if you had held "
-        "your current allocation versus the optimised allocation over the "
-        "**entire historical window**. Both portfolios start at the same "
+        "your current allocation versus the optimised allocation. "
+        "Set the start date to when you actually entered the market for "
+        "personalised results. Both portfolios start at the same "
         "dollar value and are never rebalanced — pure buy-and-hold."
     )
 
-    backtest_start_val = st.number_input(
-        "Starting portfolio value ($) for backtest",
-        min_value=100.00, value=10000.00, step=100.00, format="%.2f",
-        help="Both portfolios start with this same dollar amount.",
+    # Determine the valid date range from the available returns data
+    _bt_index = returns.dropna().index
+    if _bt_index.tz is not None:
+        _bt_index = _bt_index.tz_localize(None)
+    _min_bt_date = _bt_index.min().date()
+    _max_bt_date = (_bt_index.max() - pd.Timedelta(days=30)).date()
+
+    bt_col1, bt_col2 = st.columns(2)
+    with bt_col1:
+        backtest_start_val = st.number_input(
+            "Starting portfolio value ($)",
+            min_value=100.00, value=10000.00, step=100.00, format="%.2f",
+            help="Both portfolios start with this same dollar amount.",
+        )
+    with bt_col2:
+        backtest_start_date = st.date_input(
+            "Start date",
+            value=_min_bt_date,
+            min_value=_min_bt_date,
+            max_value=_max_bt_date,
+            help=(
+                "The date you entered the market. The backtest runs from this "
+                "date to the most recent trading day in the data. Defaults to "
+                "the earliest available date (~5 years of history)."
+            ),
+        )
+
+    # Slice returns to the selected window
+    _start_ts = pd.Timestamp(backtest_start_date)
+    if returns.index.tz is not None:
+        _start_ts = _start_ts.tz_localize(returns.index.tz)
+    returns_bt = returns.dropna()
+    returns_bt = returns_bt[returns_bt.index >= _start_ts]
+
+    if len(returns_bt) < 30:
+        st.warning(
+            f"Only {len(returns_bt)} trading days found after {backtest_start_date}. "
+            "Please select an earlier start date for a meaningful backtest."
+        )
+        st.stop()
+
+    _n_days = len(returns_bt)
+    _n_years = _n_days / 252
+    _actual_start = returns_bt.index[0].date()
+    _actual_end = returns_bt.index[-1].date()
+    st.caption(
+        f"Simulating **{_actual_start}** → **{_actual_end}**  "
+        f"({_n_days} trading days, {_n_years:.1f} years)"
     )
 
-    # Simulate both portfolios
-    user_sim = simulate_portfolio(returns, current_weights_dict, starting_value=backtest_start_val)
-    opt_sim = simulate_portfolio(returns, opt_result["weights"], starting_value=backtest_start_val)
+    # Simulate both portfolios over the selected window
+    user_sim = simulate_portfolio(returns_bt, current_weights_dict, starting_value=backtest_start_val)
+    opt_sim = simulate_portfolio(returns_bt, opt_result["weights"], starting_value=backtest_start_val)
 
     user_stats = compute_backtest_stats(user_sim, risk_free_rate=risk_free_rate)
     opt_stats = compute_backtest_stats(opt_sim, risk_free_rate=risk_free_rate)

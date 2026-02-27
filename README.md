@@ -15,8 +15,8 @@ Try the app live on Streamlit:
 
 ### How to Use It
 1. Enter your desired ticker symbols (e.g., `AAPL`, `TSLA`, `GOOGL`)
-2. Enter the exact dollar amount invested in each asset
-3. Explore your portfolio's risk/return profile, optimisation suggestions, and rebalancing trades
+2. Select a currency (USD, CAD, EUR, GBP, and more) and enter the amount invested in each asset — the app automatically converts everything to USD for normalisation
+3. Explore your portfolio's risk/return profile, optimisation suggestions, rebalancing trades, and asset suggestions
 
 No setup required — just click, input, and analyse! 🚀
 
@@ -25,6 +25,7 @@ No setup required — just click, input, and analyse! 🚀
 ## 🚀 Features
 
 ### Core Analytics
+- **Multi-Currency Input** — Select a currency per asset (USD, CAD, EUR, GBP, CHF, AUD, JPY, and more); live exchange rates are fetched automatically and all amounts are normalised to USD so weights are always correct
 - **Portfolio Price Chart** — Historical price data fetched from Yahoo Finance via yfinance
 - **30-Day Rolling Volatility** — Per-asset historical volatility displayed as percentages
 - **Correlation Heatmap** — Interactive heatmap showing how each asset pair moves together
@@ -69,13 +70,25 @@ Composite gauge (0–100) combining:
 - Concentration/diversification penalty
 
 ### Portfolio Optimiser
-Four mathematically-grounded optimisation strategies:
+Four mathematically-grounded optimisation strategies, each with an in-app explanation of when to use it:
 - **Minimum Variance** — Lowest possible portfolio risk (no return estimates needed)
 - **Maximum Sharpe Ratio** — Best risk-adjusted return
 - **Risk Parity** — Equal risk contribution from every asset
 - **Minimum CVaR** — Minimise tail risk (Expected Shortfall)
 - **Efficient Frontier** — Visual curve showing optimal return-for-risk tradeoffs, with current vs optimised portfolio markers
 - Adjustable max weight constraint to prevent over-concentration
+
+### Asset Suggestions
+Recommends new ETFs to add to your portfolio using a two-phase engine:
+- **Phase 1 — Fast screening** — Blends each of ~40 candidate ETFs at a 10% trial weight and scores by the user's chosen objective; enforces category diversity (top 2 per asset class) before selecting a shortlist of 8
+- **Phase 2 — Joint optimisation** — Runs a single optimiser pass on your existing portfolio combined with the shortlisted candidates; the resulting weight per candidate IS the confidence metric — no synthetic score, just the answer to "how much should I actually buy?"
+- **Four objectives** to personalise recommendations:
+  - *Best Risk-Adjusted Return* — ranks by Sharpe improvement, uses Max Sharpe optimiser
+  - *Maximize Diversification* — ranks by lowest correlation with existing portfolio, uses Min Variance
+  - *Maximize Returns* — ranks by annual return uplift, uses Max Sharpe
+  - *Maximize Stability* — ranks by volatility reduction, uses Min Variance
+- Adjustable per-asset weight cap so no single new position dominates
+- Results cached for 1 hour per unique portfolio — no repeated Yahoo Finance calls on re-renders
 
 ### Rebalancing Engine
 Implements the MIT lecture principle that diversification only works if you rebalance:
@@ -86,12 +99,18 @@ Implements the MIT lecture principle that diversification only works if you reba
 
 ### Backtest: Your Weights vs Optimised
 Simulates historical performance to answer "would following the app's advice have made me more money?":
+- **Custom Start Date** — Set the backtest start date to match when you actually entered the market, rather than always backtesting from the beginning of the data
 - **Portfolio Value Over Time** — Interactive chart comparing both portfolios from the same starting dollar amount
 - **Final Value Comparison** — Exact dollar difference between the two strategies
 - **Drawdown Comparison** — Side-by-side drawdown curves showing which portfolio had deeper dips
 - **Full Statistics Table** — 10 metrics head-to-head: total return, CAGR, Sharpe, Sortino, max drawdown, Calmar, best/worst day, and win rate
 - Includes a hindsight bias disclaimer — the optimiser picks weights using the full history, so real-world results will differ
-```
+
+### Strategy Explanations
+Each optimisation strategy and forecast-driven allocation mode includes an in-app info box describing:
+- What the strategy does mathematically
+- When to use it (e.g., uncertain return forecasts → prefer Min Variance over Max Sharpe)
+- Real-world contexts where it's most appropriate
 
 ### Guided Tooltips
 Every metric includes a hover tooltip explaining:
@@ -106,13 +125,14 @@ Every metric includes a hover tooltip explaining:
 ```
 portfolio-risk-navigator/
 ├── main.py                    # Streamlit UI and orchestration
-├── data_pipeline.py           # Yahoo Finance data fetching and returns calculation
+├── data_pipeline.py           # Yahoo Finance data fetching, returns, and exchange rates
 ├── risk_analysis.py           # Portfolio math, Sharpe, and downside risk metrics
 ├── optimizer.py               # Min-variance, max-Sharpe, risk parity, CVaR, efficient frontier
 ├── rebalancer.py              # Drift tracking and trade list generation
 ├── backtester.py              # Historical backtest: your weights vs optimised
 ├── expected_gl.py             # Expected Gain/Loss framework (MIT Lecture 13)
 ├── forecast_allocation.py     # LSTM → forecast covariance → allocation engine
+├── asset_suggester.py         # Two-phase asset suggestion engine (screening + joint optimisation)
 ├── lstm_model.py              # LSTM model definition and inference
 ├── train_universal_model.py   # Offline LSTM training script
 ├── models/

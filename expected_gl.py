@@ -1,6 +1,6 @@
 """
-Expected Gain / Expected Loss Analysis
-=======================================
+Expected Gain / Expected Loss Analysis:
+
 Implements the risk framework from MIT OCW Lecture 13 (Prof. Jake Xia):
 
     "Replace volatility with a direct assessment of Expected Gain (G)

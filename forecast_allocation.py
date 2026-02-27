@@ -113,6 +113,7 @@ def forecast_min_variance(
     forecast_vols: dict,
     max_weight: float = 1.0,
     long_only: bool = True,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Minimum-variance portfolio using the forecast-adjusted covariance.
@@ -141,7 +142,7 @@ def forecast_min_variance(
         "weights": dict(zip(returns.columns, weights)),
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
         "method": "Forecast Min-Variance",
     }
 
@@ -150,6 +151,7 @@ def forecast_risk_parity(
     returns: pd.DataFrame,
     forecast_vols: dict,
     max_weight: float = 1.0,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Risk parity using the forecast-adjusted covariance.
@@ -194,7 +196,7 @@ def forecast_risk_parity(
         "weights": dict(zip(returns.columns, weights)),
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
         "risk_contributions": dict(zip(returns.columns, rc_pct)),
         "method": "Forecast Risk-Parity",
     }
@@ -206,6 +208,7 @@ def volatility_target_weights(
     returns: pd.DataFrame,
     forecast_vols: dict,
     target_vol: float = 0.15,
+    risk_free_rate: float = 0.0,
 ) -> dict:
     """
     Scale portfolio exposure so that predicted annualised portfolio
@@ -251,7 +254,7 @@ def volatility_target_weights(
         "weights": {t: float(w) for t, w in zip(tickers, w_scaled)},
         "annual_return": ann_ret,
         "annual_volatility": ann_vol,
-        "sharpe": ann_ret / ann_vol if ann_vol > 0 else 0.0,
+        "sharpe": (ann_ret - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0,
         "leverage": leverage,
         "cash_weight": cash_weight,
         "predicted_port_vol": pred_port_vol,
