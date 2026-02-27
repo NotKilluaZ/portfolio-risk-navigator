@@ -3,6 +3,27 @@ import pandas as pd
 from scipy.optimize import minimize
 
 
+def _regularize_cov(cov: np.ndarray) -> np.ndarray:
+    """
+    Prevent extreme concentration in near-identical assets (e.g. SPY/IVV
+    with correlation 0.999) by clipping off-diagonal correlations to ±0.98.
+
+    The diagonal standard deviations are preserved exactly — only the
+    cross-asset co-movement is softened.  Assets with genuine differences
+    (correlation < 0.98) are completely unaffected.
+
+    Without this, SLSQP at ftol=1e-12 exploits 4th-decimal-place sampling
+    noise in the covariance matrix and assigns 98%+ to one of two
+    effectively identical assets.
+    """
+    std = np.sqrt(np.diag(cov))
+    std = np.where(std < 1e-12, 1e-12, std)
+    corr = cov / np.outer(std, std)
+    np.clip(corr, -0.98, 0.98, out=corr)
+    np.fill_diagonal(corr, 1.0)
+    return np.outer(std, std) * corr
+
+
 def _annualised_stats(weights, mean_returns, cov_matrix):
     """Return (annualised_return, annualised_vol) for a weight vector."""
     w = np.array(weights)
@@ -33,7 +54,7 @@ def min_variance_weights(
     """
     returns = _check_inputs(returns)
     n = returns.shape[1]
-    cov = returns.cov().values  # daily covariance
+    cov = _regularize_cov(returns.cov().values)
 
     def objective(w):
         return np.dot(w, np.dot(cov, w))
@@ -74,7 +95,7 @@ def max_sharpe_weights(
     returns = _check_inputs(returns)
     n = returns.shape[1]
     mean_ret = returns.mean().values
-    cov = returns.cov().values
+    cov = _regularize_cov(returns.cov().values)
 
     def neg_sharpe(w):
         ann_ret, ann_vol = _annualised_stats(w, mean_ret, cov)
@@ -116,7 +137,7 @@ def risk_parity_weights(
     """
     returns = _check_inputs(returns)
     n = returns.shape[1]
-    cov = returns.cov().values
+    cov = _regularize_cov(returns.cov().values)
 
     def _risk_contribution(w):
         port_var = np.dot(w, np.dot(cov, w))
@@ -178,7 +199,7 @@ def min_cvar_weights(
     returns = _check_inputs(returns)
     n_assets = returns.shape[1]
     T = returns.shape[0]
-    ret_matrix = returns.values  # (T, n_assets)
+    ret_matrix = returns.values
 
     # Decision variables: [w_1, ..., w_n, zeta]
     # where zeta is the VaR threshold in the R-U formulation.
@@ -245,7 +266,7 @@ def compute_efficient_frontier(
     returns = _check_inputs(returns)
     n = returns.shape[1]
     mean_ret = returns.mean().values
-    cov = returns.cov().values
+    cov = _regularize_cov(returns.cov().values)
 
     # Find the range of feasible returns
     min_var = min_variance_weights(returns, max_weight=max_weight, long_only=long_only)

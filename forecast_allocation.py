@@ -84,10 +84,12 @@ def build_forecast_covariance(
     """
     returns = returns.dropna()
     tickers = list(returns.columns)
-    n = len(tickers)
 
-    # Historical correlation matrix
+    # Historical correlation matrix — clip extremes to prevent concentration
+    # in near-identical assets (same logic as _regularize_cov in optimizer.py)
     corr = returns.corr().values
+    np.clip(corr, -0.98, 0.98, out=corr)
+    np.fill_diagonal(corr, 1.0)
 
     # Diagonal of predicted daily vols
     pred_vols = np.array([forecast_vols[t]["daily_vol"] for t in tickers])

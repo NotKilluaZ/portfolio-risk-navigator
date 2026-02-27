@@ -643,7 +643,7 @@ try:
     pred_port_annual_vol = np.sqrt(max(pred_port_daily_var, 0.0)) * np.sqrt(252)
 except Exception:
     pred_port_annual_vol = p_volatility  # fallback to historical portfolio vol
-fvs = float(np.clip(100 - pred_port_annual_vol * 150, 0, 100))
+fvs = float(np.clip(100 - pred_port_annual_vol * 165, 0, 100))
 
 
 # Rolling volatility score
@@ -659,13 +659,15 @@ else:
     else:
         current_vol = float(hist_port_vol.iloc[-1])
         current_annual_vol = current_vol * np.sqrt(252)
-        rvs = float(np.clip(100 - current_annual_vol * 150, 0, 100))
+        rvs = float(np.clip(100 - current_annual_vol * 165, 0, 100))
 
 
 # Sharpe Ratio score
-# tanh(sharpe) maps: -2→~0, -1→12, 0→50, 1→88, 2→~100
+# tanh(sharpe*1.5)*60 maps: -1→~-57, -0.5→~-35, 0→0, 0.5→+35, 1→+57
+# This is steeper than the old *50 version: negative Sharpe punishes harder,
+# positive Sharpe rewards faster.
 sharpe_clean = float(np.nan_to_num(sharpe_ratio, nan=0.0))
-ss = float(np.clip(50 + 50 * np.tanh(sharpe_clean), 0, 100))
+ss = float(np.clip(50 + 60 * np.tanh(sharpe_clean * 1.5), 0, 100))
 
 # Max Drawdown score
 # 0% drawdown → 100; -67% drawdown → 0. Fixes the old formula's ceiling of 85.
@@ -692,11 +694,11 @@ else:
 
 
 # Component weights:
-# fvs/rvs: 20% each — absolute vol punishes genuinely risky portfolios
-# ss: 20% — Sharpe matters but shouldn't override severe drawdown/vol signals
-# dds: 25% — drawdown is the most visceral risk for investors
-# cp: 15% — diversification bonus
-health_score = 0.20*fvs + 0.20*rvs + 0.20*ss + 0.25*dds + 0.15*cp
+# fvs/rvs: 18% each — absolute vol punishes genuinely risky portfolios
+# ss: 15% — Sharpe matters but is noisy; steeper tanh compensates
+# dds: 30% — drawdown is the most visceral risk for investors (raised from 25%)
+# cp: 19% — diversification is a free lunch; reward it more (raised from 15%)
+health_score = 0.18*fvs + 0.18*rvs + 0.15*ss + 0.30*dds + 0.19*cp
 health_score = float(np.nan_to_num(health_score, nan=0.0, posinf=100.0, neginf=0.0))
 
 
