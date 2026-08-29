@@ -1,10 +1,13 @@
 - name: Keep Streamlit app awake
   run: |
+    STREAMLIT_COOKIE_JAR="$(mktemp)"
     curl \
       --fail \
       --silent \
       --show-error \
       --location \
+      --cookie-jar "$STREAMLIT_COOKIE_JAR" \
+      --cookie "$STREAMLIT_COOKIE_JAR" \
       --max-redirs 5 \
       --max-time 60 \
       https://portfolio-risk-navigator.streamlit.app/
