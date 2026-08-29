@@ -1,13 +1,30 @@
-- name: Keep Streamlit app awake
-  run: |
-    STREAMLIT_COOKIE_JAR="$(mktemp)"
-    curl \
-      --fail \
-      --silent \
-      --show-error \
-      --location \
-      --cookie-jar "$STREAMLIT_COOKIE_JAR" \
-      --cookie "$STREAMLIT_COOKIE_JAR" \
-      --max-redirs 5 \
-      --max-time 60 \
-      https://portfolio-risk-navigator.streamlit.app/
+name: Keep Streamlit Warm
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  keep-warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping Streamlit app
+        shell: bash
+        run: |
+          STREAMLIT_COOKIE_JAR="$(mktemp)"
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --cookie-jar "$STREAMLIT_COOKIE_JAR" \
+            --cookie "$STREAMLIT_COOKIE_JAR" \
+            --max-redirs 5 \
+            --max-time 60 \
+            --output /dev/null \
+            --write-out "Final status: %{http_code}; redirects: %{num_redirects}\n" \
+            "https://portfolio-risk-navigator.streamlit.app/"
